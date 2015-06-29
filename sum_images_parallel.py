@@ -1,4 +1,5 @@
 import numpy as np
+import pdb
 import glob
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -11,7 +12,7 @@ def sumImages(filename_list, num_cores, filter = None):
         return sublists
     if len(filename_list) < 2:
         return
-    imsum = np.array(Image.open(filename_list[0])
+    imsum = np.array(Image.open(filename_list[0]))
     for fname in filename_list[1:]:
         imsum += np.array(Image.open(filename_list[0]))
 
@@ -27,6 +28,7 @@ def radialSum(data, center = None):
     tbin = np.bincount(r.ravel(), data.ravel())
     nr = np.bincount(r.ravel())
     radialprofile = tbin / nr
+    pdb.set_trace()
     return radialprofile 
 
 class Run(object):
@@ -40,7 +42,7 @@ class Run(object):
     def switch_condition(self, condition):
         if condition is None:
             self.condition = "default"
-        if not os.path.exists("mkdir runs/" + self.prefix)
+        if not os.path.exists("mkdir runs/" + self.prefix):
             os.system("mkdir runs/" + self.prefix)
         self.condition = condition
 
