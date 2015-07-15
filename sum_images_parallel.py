@@ -19,6 +19,19 @@ import string
 
 DATA_DIR = "/data/seidler_1506/script_cache"
 
+
+def memoize(f):
+    """ Memoization decorator for functions taking one or more arguments. """
+    class memodict(dict):
+        def __init__(self, f):
+            self.f = f
+        def __call__(self, *args):
+            return self[args]
+        def __missing__(self, key):
+            ret = self[key] = self.f(*key)
+            return ret
+    return memodict(f)
+
 #center coords of the beam on the ccd
 CENTER = [1984, 1967]
 
@@ -79,6 +92,7 @@ def radial_density_paths(directory_glob_pattern):
     return radial_paths
     
 #TODO: make this consistent
+@memoize
 def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = False):
     paths = radial_density_paths(directory_glob_pattern)
     extractIntensity = lambda name: np.genfromtxt(name)
@@ -116,7 +130,7 @@ def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = F
 #            np.savetxt(radial_path, radial)
 
 
-def generate_radial_all(directory_glob_pattern):
+def generate_radial_all(directory_glob_pattern, recompute = False):
     """ 
     given a glob pattern, generate radial distributions for all the matching .mccd files
     """
@@ -134,9 +148,16 @@ def generate_radial_all(directory_glob_pattern):
         radial_directory = os.path.dirname(radial_path)
         if not os.path.exists(radial_directory):
             os.mkdir(radial_directory)
-        if not os.path.exists(radial_path):
+        if (not os.path.exists(radial_path)) or recompute:
             radial = radialSum(np.array(Image.open(mccd)),  center = CENTER)
             np.savetxt(radial_path, radial)
+
+
+def default_bgsubtraction(x, y, endpoint_size = 10, endpoint_right = 10):
+    bgx = np.concatenate((x[:endpoint_size], x[-endpoint_right:]))
+    bgy = np.concatenate((y[:endpoint_size], y[-endpoint_right:]))
+    interp_func = extrap1d(interp1d(bgx, bgy))
+    return interp_func
 
 #normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which 
 #normalization is desired.
@@ -155,7 +176,8 @@ def plot(radial_distribution, normalization = None, bgsub = None, label = None, 
         return interp_func
 
     if bgsub is None:
-        bgsub = default_bgsubtraction
+        #bgsub = default_bgsubtraction
+        bgsub = lambda x, y: lambda z: 0
 
     def show():
         plt.xlabel("angle (degrees)")
@@ -177,7 +199,8 @@ def plot(radial_distribution, normalization = None, bgsub = None, label = None, 
             #normval = orig_interpolated(normalization)
             intensity *= normalization
         plt.plot(r, gaussian_filter(intensity, smooth), label = label)
-    plotOne(label)
+        return r, intensity
+    return plotOne(label)
 
 
 
@@ -493,7 +516,7 @@ def plotAll(glob_patterns, show = True, individual = False, subArray = None, nor
 #        run.plot(bgsub = bgsub, normalization = normalization, label = label)
 #        return run
     def run_and_plot(glob, bgsub = None, label = None, data_filter = None, normalization = None):
-        plot(sum_radial_densities(glob, give_tuple = True), normalization = normalization, bgsub = bgsub, label = glob)
+        return plot(sum_radial_densities(glob, False, True), normalization = normalization, bgsub = bgsub, label = glob)
     if individual is True:
         #TODO: support kwargs
         for patt in glob_patterns:
@@ -503,26 +526,16 @@ def plotAll(glob_patterns, show = True, individual = False, subArray = None, nor
             runs = map(run_and_plot, fileList)
             runs[-1].show()
     else:
+        outputs = []
         for patt, subtraction, label, one_filter, norm in zip(glob_patterns, subArray, labelList, filterList, normalizationArray):
-           run_and_plot(patt, bgsub = subtraction, label = label, data_filter = one_filter, normalization = norm)
+           outputs = outputs + [run_and_plot(patt, bgsub = subtraction, label = label, data_filter = one_filter, normalization = norm)]
         plt.legend()
         plt.show()
-
-def memoize(f):
-    """ Memoization decorator for functions taking one or more arguments. """
-    class memodict(dict):
-        def __init__(self, f):
-            self.f = f
-        def __call__(self, *args):
-            return self[args]
-        def __missing__(self, key):
-            ret = self[key] = self.f(*key)
-            return ret
-    return memodict(f)
+    return np.vstack((_ for _ in fe3o4dat)) #output format: angles, intensities, angles, intensities, etc. 
 
 
-def radial_mean(filenames, sigma = 1):
-    return gaussian_filter(sum_radial_densities(filenames, average = True), sigma = sigma)
+#def radial_mean(filenames, sigma = 1):
+#    return gaussian_filter(sum_radial_densities(filenames, average = True), sigma = sigma)
 
 @memoize
 def dark_subtraction(npulses, nframes = 1):
@@ -573,13 +586,13 @@ def kapton_only(npulses, attenuation = 1, nframes = 1, subtract_air_scatter = Fa
     """
     returns the signal for kapton, not including dark counts or air scatter
     """
-    return (kapton_background(npulses, attenuation) - air_scatter(npulses, attenuation))
+    return (kapton_background(npulses, attenuation, nframes) - air_scatter(npulses, attenuation, nframes))
 
 
 
-def bgsubtract(npulses, attenuation, nframes, kaptonfactor = 1.):
+def bgsubtract(npulses, attenuation, nframes, kaptonfactor = 1., airfactor = 1.):
     darksub = dark_subtraction(npulses, nframes)
-    airsub = air_scatter(npulses, attenuation, nframes)
+    airsub = airfactor * air_scatter(npulses, attenuation, nframes)
     #kaptonsub = kaptonfactor * kapton_background(npulses, attenuation, nframes)
     kaptonsub = kaptonfactor * kapton_only(npulses, attenuation, nframes)
     interp_func = lambda x, y: extrap1d(interp1d(x, kaptonsub + darksub + airsub))
