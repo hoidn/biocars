@@ -1,4 +1,5 @@
 import numpy as np
+import scipy
 import pickle
 import os
 import pdb
@@ -12,13 +13,36 @@ from scipy.ndimage.filters import gaussian_filter
 from scipy import arange, array, exp
 import operator
 import fnmatch
+from  libtiff import TIFF
 
 import multiprocessing as mp
 import random
 import string
 
-DATA_DIR = "/data/seidler_1506/script_cache"
+#import deconvolution
 
+DATA_DIR = "/media/sf_data/seidler_1506/script_cache"
+PHOTON_ENERGY = 12000.
+HBARC = 1973. #eV * Angstrom
+
+def mask_peaks_and_iterpolate(x, y, peak_ranges):
+    for peakmin, peakmax in peak_ranges:
+        good_indices = np.where(np.logical_or(x < peakmin, x > peakmax))[0]
+        y = y[good_indices]
+        x = x[good_indices]
+    return scipy.interpolate.interp1d(x, y)
+
+def peak_sizes(x, y, peak_ranges, bg_subtract = True):
+    backgnd = mask_peaks_and_iterpolate(x, y, peak_ranges)
+    if bg_subtract is True:
+        subtracted = y - backgnd(x)
+    else:
+        subtracted = y
+    sizeList = []
+    for peakmin, peakmax in peak_ranges:
+        peakIndices = np.where(np.logical_and(x >= peakmin, x <= peakmax))[0]
+        sizeList += [np.sum(subtracted[peakIndices])]
+    return sizeList
 
 def memoize(f):
     """ Memoization decorator for functions taking one or more arguments. """
@@ -90,7 +114,7 @@ def radial_density_paths(directory_glob_pattern):
     all_mccds = deep_glob(directory_glob_pattern)
     radial_paths = map(radial_name, all_mccds)
     return radial_paths
-    
+
 #TODO: make this consistent
 @memoize
 def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = False):
@@ -105,33 +129,9 @@ def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = F
     else:
         return sum_many(map(extractIntensity, paths))[1]/len(paths)
 
-#TODO: why doesn't this work?
-#def generate_radial_all(directory_glob_pattern):
-#    """ 
-#    given a glob pattern, generate radial distributions for all the matching .mccd files
-#    """
-##    def radial_name(prefix):
-##        dirname = os.path.dirname(prefix)
-##        basename = os.path.basename(prefix)
-##        radial_file_path = dirname + "/radial_integrations/" + basename + "processed.dat"
-##        return radial_file_path
-##
-#    if directory_glob_pattern[-5:] != ".mccd":
-#        directory_glob_pattern = directory_glob_pattern + "*mccd"
-#    all_mccds = deep_glob(directory_glob_pattern)
-##    for mccd in all_mccds:
-##        radial_path = radial_name(mccd)
-#    for mccd, radial_path in zip(all_mccds, radial_density_paths(directory_glob_pattern)):
-#        radial_directory = os.path.dirname(radial_path)
-#        if not os.path.exists(radial_directory):
-#            os.mkdir(radial_directory)
-#        if not os.path.exists(radial_path):
-#            radial = radialSum(np.array(Image.open(mccd)),  center = CENTER)
-#            np.savetxt(radial_path, radial)
-
 
 def generate_radial_all(directory_glob_pattern, recompute = False):
-    """ 
+    """
     given a glob pattern, generate radial distributions for all the matching .mccd files
     """
     def radial_name(prefix):
@@ -149,7 +149,8 @@ def generate_radial_all(directory_glob_pattern, recompute = False):
         if not os.path.exists(radial_directory):
             os.mkdir(radial_directory)
         if (not os.path.exists(radial_path)) or recompute:
-            radial = radialSum(np.array(Image.open(mccd)),  center = CENTER)
+            #radial = radialSum(np.array(Image.open(mccd)),  center = CENTER)
+            radial = radialSum(TIFF.open(mccd, 'r').read_image(),  center = CENTER)
             np.savetxt(radial_path, radial)
 
 
@@ -159,12 +160,13 @@ def default_bgsubtraction(x, y, endpoint_size = 10, endpoint_right = 10):
     interp_func = extrap1d(interp1d(bgx, bgy))
     return interp_func
 
-#normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which 
+#normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which
 #normalization is desired.
 #TODO: smooth. why doesn't it work?
-def plot(radial_distribution, normalization = None, bgsub = None, label = None, smooth = 1):
+def plot(radial_distribution, normalization = None, bgsub = None, label = None,
+smooth = 1, scale = 'angle'):
     """
-    bgsub is a function that takes x and y coordinates and returns an interpolation that 
+    bgsub is a function that takes x and y coordinates and returns an interpolation that
     yields background subtraction as a function of x
 
     filter takes an int (the total intensity in a given frame) and returns a boolean
@@ -198,8 +200,15 @@ def plot(radial_distribution, normalization = None, bgsub = None, label = None, 
             #normval = interpolated(normalization)
             #normval = orig_interpolated(normalization)
             intensity *= normalization
-        plt.plot(r, gaussian_filter(intensity, smooth), label = label)
-        return r, intensity
+        if scale == 'q':
+            qq = 2 * PHOTON_ENERGY * np.sin(np.deg2rad(r/2))/HBARC
+            plt.plot(qq, gaussian_filter(intensity, smooth), label = label)
+            return qq, intensity
+        if scale == 'angle':
+            plt.plot(r, gaussian_filter(intensity, smooth), label = label)
+            return r, intensity
+        else:
+            raise ValueError("invalid key: " +  str(scale))
     return plotOne(label)
 
 
@@ -238,11 +247,20 @@ def extrap1d(interpolator):
     xs = interpolator.x
     ys = interpolator.y
 
+#    def pointwise(x):
+#        if x < xs[0]:
+#            return ys[0]+(x-xs[0])*(ys[1]-ys[0])/(xs[1]-xs[0])
+#        elif x > xs[-1]:
+#            return ys[-1]+(x-xs[-1])*(ys[-1]-ys[-2])/(xs[-1]-xs[-2])
+#        else:
+#            return interpolator(x)
+
+
     def pointwise(x):
         if x < xs[0]:
-            return ys[0]+(x-xs[0])*(ys[1]-ys[0])/(xs[1]-xs[0])
+            return 0.
         elif x > xs[-1]:
-            return ys[-1]+(x-xs[-1])*(ys[-1]-ys[-2])/(xs[-1]-xs[-2])
+            return 0.
         else:
             return interpolator(x)
 
@@ -296,34 +314,9 @@ def radialSum(data, distance = 140000., pixSize = 88.6, center = None):
     tbin = np.bincount(r.ravel(), data.ravel())
     nr = np.bincount(r.ravel())
     radialprofile = tbin / nr
-    #pdb.set_trace()
     rsorted = np.sort(np.unique(r.ravel()))
     theta = np.arctan(rsorted * pixSize / distance)
-    return np.rad2deg(theta), radialprofile 
-
-
-##normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which 
-##normalization is desired.
-#def plot(name, normalization = "peak"):
-#    def plotOne(name):
-#        r, intensity = np.genfromtxt("runs/" + self.name + "/" + name + "/processed.dat")
-#        if normalization == "peak":
-#            intensity /= np.max(intensity)
-#        elif isinstance(normalization, (int, long, float)):
-#            interpolated = interpolate.interp1d(r, intensity)
-#            normval = interpolated(normalization)
-#            intensity /= normval
-#        plt.plot(r, intensity, label = self.name + "_" + conditionStr)
-#    if condition is None:
-#        plotOne(self.condition)
-#    else:
-#        plotOne(condition)
-
-#def findCenter(data, searchwidth = 1000):
-#    w, h = np.shape(data)
-#    def difference(center):
-#        arrchunk = np.sum(data[w/2 - 100, w/2 + 100, :], axis = 0)
-#        difference 
+    return np.rad2deg(theta), radialprofile
 
 
 def swap(arr1d, centerindx):
@@ -333,176 +326,11 @@ def swap(arr1d, centerindx):
         newarr[centerindx - i], newarr[centerindx + i] = newarr[centerindx + i], newarr[centerindx - i]
     return np.sum(np.abs(newarr - arr1d))
 
-#class Run(object):
-#    def __init__(self, name, condition = None, center = [1984, 1967]):
-#    #def __init__(self, name, condition = None, center = [1984, 1873]):
-#        if not os.path.isdir("runs/" + name):
-#            os.mkdir("runs/" + name)
-#        self.name = name
-#        self.switch_condition(condition)
-#        self.center = center #center coords of powder pattern on detector
-#    
-#    def switch_condition(self, condition):
-#        if condition is None:
-#            self.condition = "default"
-#        else:
-#            self.condition = condition
-#	self.prefix = "runs/" + self.name + '/' + self.condition
-#        if not os.path.exists(self.prefix):
-#            os.mkdir(self.prefix)
-#
-#    def add_frames(self, files = None, globbing = False):
-#        """
-#        mode can equal names or glob
-#        """
-#        if files == None:
-#            files = glob.glob("*.mccd")
-#        if len(files) == 0:
-#            print "no new files found"
-#            return
-#
-#        globbed_files = files
-##        globbed_files = []
-##        for file in files:
-##            globbed_files = globbed_files + glob.glob(file)
-#        #pdb.set_trace()
-#        newFiles = [self.prefix + "/" + fname for fname in globbed_files]
-#        for fname, newfname in zip(globbed_files, newFiles):
-#            os.system("mv " + fname + " " + newfname)
-#        allfiles  = glob.glob(self.prefix + "/*.mccd")
-#        summed = sumImages(allfiles, 1)
-#        summed.astype("uint32").tofile(self.prefix + "/averaged.dat") 
-#        #summed.tofile(self.prefix + "/averaged.dat") 
-#        #TODO: is this center value right?
-#        radial = radialSum(summed,  center = self.center)
-#        np.savetxt(self.prefix + "/processed.dat", radial)
-#
-#    #normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which 
-#    #normalization is desired.
-#    def plot(self, condition = None, normalization = "peak", bgsub = 0):
-#        def plotOne(conditionStr):
-#            r, intensity = np.genfromtxt("runs/" + self.name + "/" + conditionStr + "/processed.dat")
-#            intensity -= bgsub
-#            if normalization == "peak":
-#                intensity /= np.max(intensity)
-#            elif isinstance(normalization, (int, long, float)):
-#                interpolated = interpolate.interp1d(r, intensity)
-#                normval = interpolated(normalization)
-#                intensity /= normval
-#            plt.plot(r, intensity, label = self.name + "_" + conditionStr)
-#        if condition is None:
-#            plotOne(self.condition)
-#        else:
-#            plotOne(condition)
-#
-#    def show(self):
-#        plt.xlabel("angle (degrees)")
-#        plt.ylabel("inensity (arb)")
-#        plt.legend()
-#        plt.show()
-#
 
-#class Run(object):
-#    def __init__(self, name, condition = None, center = CENTER, data_filter = None, recompute = False):
-#        if name[-5:] != ".mccd":
-#            self.glob = name + "*.mccd"
-#        else:
-#            self.glob = name
-#        if data_filter is not None:
-#            self.data_filter = lambda filename: data_filter(self.intensity_distribution_dictionary[filename])
-#        else:
-#            self.data_filter = lambda intensity: True
-#        self.basename = name.replace("*", '')
-#        self.directory = os.path.dirname(self.basename)
-#        self.center = center #center coords of powder pattern on detector
-#        self.sumpath = self.basename + "summed.dat"
-#        self.radialpath = self.basename + "processed.dat"
-#        self.allfiles = None
-#        self.intensity_distribution_dictionary = None
-#        allfiles = glob.glob(self.glob)
-#        self.allfiles = allfiles
-#        self.process(recompute = recompute)
-#
-#    def already_processed(self):
-#        return os.path.exists(self.radialpath)
-#
-#    def intensity_distribution(self, reprocess = False):
-#        #TODO: refactor
-#        if self.intensity_distribution_dictionary is not None:
-#            return self.intensity_distribution_dictionary
-#        elif os.path.exists(self.basename + "intensities.p"):
-#            self.intensity_distribution_dictionary = pickle.load(open(self.basename + "intensities.p", "rb"))
-#            return self.intensity_distribution_dictionary
-#
-##        if (not self.already_processed()) or reprocess:
-##            self.process(recompute = True)
-#        def intensity(filename):
-#            return np.sum(np.array(Image.open(filename)))
-#        intensities = map(intensity, self.allfiles)
-#        self.intensity_distribution_dictionary =  {name: intensity for (name, intensity) in zip(self.allfiles, intensities)}
-#        with open(self.basename + "intensities.p", "wb") as f:
-#            pickle.dump(self.intensity_distribution_dictionary, f)
-#        return self.intensity_distribution_dictionary
-#
-#    def process(self, recompute = False):
-#        """
-#        mode can equal names or glob
-#
-#        if filter changes you NEED to reprocess for the changes to propagate
-#        """
-#        if (not self.already_processed()) or (recompute):
-#            if self.intensity_distribution_dictionary is None:
-#                self.intensity_distribution()
-#            #intensities = [self.intensity_distribution_dictionary[name] for name in self.allfiles]
-#            goodfiles = filter(self.data_filter, self.allfiles)
-#            summed = sumImages(goodfiles, 1)
-#            summed.astype("uint32").tofile(self.basename + "summed.dat") 
-#            #summed.tofile(self.prefix + "/averaged.dat") 
-#            #TODO: is this center value right?
-#            radial = radialSum(summed,  center = self.center)
-#            np.savetxt(self.basename + "processed.dat", radial)
-#
-#    #normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which 
-#    #normalization is desired.
-#    def plot(self, normalization = "peak", bgsub = None, label = None):
-#        """
-#        bgsub is a function that takes x and y coordinates and returns an interpolation that 
-#        yields background subtraction as a function of x
-#
-#        filter takes an int (the total intensity in a given frame) and returns a boolean
-#        """
-#        def default_bgsubtraction(x, y, endpoint_size = 10, endpoint_right = 70):
-#            bgx = np.concatenate((x[:endpoint_size], x[-endpoint_right:]))
-#            bgy = np.concatenate((y[:endpoint_size], y[-endpoint_right:]))
-#            interp_func = extrap1d(interp1d(bgx, bgy))
-#            return interp_func
-#
-#        if bgsub is None:
-#            bgsub = default_bgsubtraction
-#
-#        def plotOne(label):
-#            r, intensity = np.genfromtxt(self.basename + "processed.dat")
-#            #intensity -= bgsub
-#            intensity = intensity - bgsub(r, intensity)(r)
-#            if normalization == "peak":
-#                intensity /= np.max(intensity)
-#            elif isinstance(normalization, (int, long, float)):
-#                interpolated = interpolate.interp1d(r, intensity)
-#                normval = interpolated(normalization)
-#                #intensity /= normval
-#                intensity *= normalization
-#            plt.plot(r, intensity, label = label)
-#        if label is None:
-#            label = self.basename
-#        plotOne(label)
-#
-#    def show(self):
-#        plt.xlabel("angle (degrees)")
-#        plt.ylabel("inensity (arb)")
-#        plt.legend()
-#        plt.show()
 
-def plotAll(glob_patterns, show = True, individual = False, subArray = None, normalization = "peak", normalizationArray = None, labelList = None, filterList = None, recompute = False):
+def plotAll(glob_patterns, show = True, individual = False, subArray = None,
+normalization = "peak", normalizationArray = None, labelList = None, filterList
+= None, recompute = False, scale = 'angle'):
     if subArray is None:
         subArray = [None] * len(glob_patterns)
     if labelList is None:
@@ -516,26 +344,26 @@ def plotAll(glob_patterns, show = True, individual = False, subArray = None, nor
 #        run.plot(bgsub = bgsub, normalization = normalization, label = label)
 #        return run
     def run_and_plot(glob, bgsub = None, label = None, data_filter = None, normalization = None):
-        return plot(sum_radial_densities(glob, False, True), normalization = normalization, bgsub = bgsub, label = glob)
-    if individual is True:
-        #TODO: support kwargs
-        for patt in glob_patterns:
-            if patt[-5:] != ".mccd":
-                patt = patt + "*.mccd"
-            fileList = glob.glob(patt)
-            runs = map(run_and_plot, fileList)
-            runs[-1].show()
-    else:
-        outputs = []
-        for patt, subtraction, label, one_filter, norm in zip(glob_patterns, subArray, labelList, filterList, normalizationArray):
-           outputs = outputs + [run_and_plot(patt, bgsub = subtraction, label = label, data_filter = one_filter, normalization = norm)]
-        plt.legend()
-        plt.show()
-    return np.vstack((_ for _ in fe3o4dat)) #output format: angles, intensities, angles, intensities, etc. 
+        return plot(sum_radial_densities(glob, False, True), normalization =
+normalization, bgsub = bgsub, label = glob, scale = scale)
+#    if individual is True:
+#        #TODO: support kwargs
+#        for patt in glob_patterns:
+#            if patt[-5:] != ".mccd":
+#                patt = patt + "*.mccd"
+#            fileList = glob.glob(patt)
+#            runs = map(run_and_plot, fileList)
+#            runs[-1].show()
+#    else:
+    outputs = []
+    for patt, subtraction, label, one_filter, norm in zip(glob_patterns, subArray, labelList, filterList, normalizationArray):
+       outputs = outputs + [run_and_plot(patt, bgsub = subtraction, label = label, data_filter = one_filter, normalization = norm)]
+    plt.legend()
+    plt.show(block = False)
+    #output format: angles, intensities, angles, intensities, etc.
+    return np.vstack((_ for _ in outputs))
 
 
-#def radial_mean(filenames, sigma = 1):
-#    return gaussian_filter(sum_radial_densities(filenames, average = True), sigma = sigma)
 
 @memoize
 def dark_subtraction(npulses, nframes = 1):
@@ -597,5 +425,4 @@ def bgsubtract(npulses, attenuation, nframes, kaptonfactor = 1., airfactor = 1.)
     kaptonsub = kaptonfactor * kapton_only(npulses, attenuation, nframes)
     interp_func = lambda x, y: extrap1d(interp1d(x, kaptonsub + darksub + airsub))
     return interp_func
-
 
