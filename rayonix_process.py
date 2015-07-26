@@ -18,6 +18,9 @@ from  libtiff import TIFF
 import multiprocessing as mp
 import random
 import string
+import rldeconvolution
+import mu
+from scipy.ndimage.filters import gaussian_filter as filt
 
 #import deconvolution
 
@@ -49,10 +52,11 @@ def memoize(f):
     class memodict(dict):
         def __init__(self, f):
             self.f = f
-        def __call__(self, *args):
-            return self[args]
+        def __call__(self, *args, **kwargs):
+            key = (args, frozenset(kwargs.items()))
+            return self[key]
         def __missing__(self, key):
-            ret = self[key] = self.f(*key)
+            ret = self[key] = self.f(*key[0], **{k: v for k, v in key[1]})
             return ret
     return memodict(f)
 
@@ -364,7 +368,10 @@ normalization, bgsub = bgsub, label = glob, scale = scale)
     return np.vstack((_ for _ in outputs))
 
 
+def radial_mean(filenames, sigma = 1):
+    return gaussian_filter(sum_radial_densities(filenames, average = True), sigma = sigma)
 
+#TODO: revamp this!!
 @memoize
 def dark_subtraction(npulses, nframes = 1):
     if not os.path.exists(DATA_DIR + '/dark_sub.p'):
@@ -374,6 +381,7 @@ def dark_subtraction(npulses, nframes = 1):
         dark_2000_interpolation = 2 * lookup_dict[1000] - lookup_dict[1]
         lookup_dict[250] = dark_250_interpolation
         lookup_dict[500] = dark_500_interpolation
+        lookup_dict[501] = dark_500_interpolation
         lookup_dict[2000] = dark_2000_interpolation
         with open(DATA_DIR + '/dark_sub.p', 'wb') as f:
             pickle.dump(lookup_dict, f)
@@ -426,3 +434,30 @@ def bgsubtract(npulses, attenuation, nframes, kaptonfactor = 1., airfactor = 1.)
     interp_func = lambda x, y: extrap1d(interp1d(x, kaptonsub + darksub + airsub))
     return interp_func
 
+def beam_spectrum(attenuator):
+    dat = np.genfromtxt("mda/14IDB_15067.txt")
+    beam = [dat.T[1], dat.T[21]]
+    beam[0] = 1000 * beam[0]
+    if attenuator == 'None':
+        return beam
+    elif attenuator == 'Ag':
+        Ag = mu.ElementData(47).mu
+        return [beam[0], beam[1] * np.exp(-Ag(beam[0])/12.3)]
+
+
+def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2):
+    """
+    process image files into radial distributions if necessary, then 
+    sum the distributions and deconvolve
+
+    attenuator: == 'None' or 'Ag'
+    """
+    beam = beam_spectrum(attenuator)
+    nominal_attenuations = {'None': 1, 'Ag': 300}
+    generate_radial_all(glob_pattern)
+    npulses = len(radial_density_paths(glob_pattern))
+    print "npulses: " + str(npulses)
+    angles, intensities = plotAll([glob_pattern], subArray=[bgsubtract(npulses, nominal_attenuations[attenuator], npulses, 0., .0)], normalizationArray=[norm])
+    angles = np.deg2rad(angles)
+    est = rldeconvolution.make_estimator(angles, filt(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix')
+    return est
