@@ -1,12 +1,61 @@
 import numpy as np
+#TODO: these two files are good candidates for a utilities package
 import ipdb
 import scipy.ndimage.filters as filt
 import matplotlib.pyplot as plt
 from scipy import interpolate
+import atexit, dill
+import hashlib
+import collections
 
 np.seterr(invalid='raise')
 
 TINY = 1e-9
+
+def make_hashable(obj):
+    """
+    return hash of an object that supports python's buffer protocol
+    """
+    return hashlib.sha1(obj).hexdigest()
+
+def hashable_dict(d):
+    """
+    try to make a dict convertible into a frozen set by 
+    replacing any values that aren't hashable but support the 
+    python buffer protocol by their sha1 hashes
+    """
+    #TODO: replace type check by check for object's bufferability
+    for k, v in d.iteritems():
+        # for some reason ndarray.__hash__ is defined but is None! very strange
+        #if (not isinstance(v, collections.Hashable)) or (not v.__hash__):
+        if isinstance(v, np.ndarray):
+            d[k] = make_hashable(v)
+    return d
+
+#TODO: these two files are good candidates for a utilities package
+def persist_to_file(file_name):
+
+    try:
+        cache = dill.load(open(file_name, 'r'))
+    except (IOError, ValueError):
+        cache = {}
+
+    atexit.register(lambda: dill.dump(cache, open(file_name, 'w')))
+
+    def decorator(func):
+        #check if function is a closure and if so construct a dict of its bindings
+        if func.func_code.co_freevars:
+            closure_dict = hashable_dict(dict(zip(func.func_code.co_freevars, (c.cell_contents for c in func.func_closure))))
+        else:
+            closure_dict = {}
+        def new_func(*args, **kwargs):
+            key = (args, frozenset(kwargs.items()), frozenset(closure_dict.items()))
+            if key not in cache:
+                cache[key] = func(*key[0], **{k: v for k, v in key[1]})
+            return cache[key]
+        return new_func
+
+    return decorator
 
 def extrap1d(interpolator):
     xs = interpolator.x
@@ -95,7 +144,7 @@ def unpad_data(arr, padding_length = None, endpoint_length = 10, asym = False):
     else:
         return arr[padding_length:-padding_length]
 
-def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolution_mode = 'vector', regrid = True, kernel_width = 800):
+def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolution_mode = 'vector', regrid = True, kernel_width = 1600):
     """
     return a function that takes a number of iterations and an optional starting estimate for the "real" spectrum and returns an improved estimate
     measuredx, measuredy: the target data
@@ -118,6 +167,7 @@ def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolu
     newy_padded = padrl(newy, kernel_width)
     if convolution_mode == 'vector':
         kernel_y_reversed = kernel_y[::-1]
+        @persist_to_file("cache/estimator.json")
         def estimator(num_iterations, starting_estimate = newy):
             current_estimate = starting_estimate.copy()
             for i in range(num_iterations):
@@ -126,8 +176,9 @@ def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolu
             return newx, unpad_data(current_estimate, padding_length = len(newx))
     elif convolution_mode == 'matrix':
         kernel_mat = make_deconvolution_matrix([kernelx, kernely], [newx, newy], kernel_width)
-        kernel_mat_reversed = np.fliplr(kernel_mat)
+        kernel_mat_reversed = np.ascontiguousarray(np.fliplr(kernel_mat))
         #ipdb.set_trace()
+        @persist_to_file("cache/estimator.json")
         def estimator(num_iterations, starting_estimate = newy):
             current_estimate_unpadded = starting_estimate.copy()
             current_estimate = padrl(current_estimate_unpadded, kernel_width, asym = True)
@@ -175,7 +226,7 @@ def padrl(arr1d, padlen, asym = False):
     else:
         return np.concatenate((np.zeros((padlen /2)), arr1d, np.zeros((padlen/2))))
 
-def make_deconvolution_matrix(beam_spectrum, powder_pattern, kernel_width):
+def make_deconvolution_matrix(beam_spectrum, powder_pattern, kernel_width, nominal_energy = 12000.):
     """
     return matrix of point spread functions as a function of scattering
     angle, given an incident spectrum
@@ -189,6 +240,7 @@ def make_deconvolution_matrix(beam_spectrum, powder_pattern, kernel_width):
 
     kernel_width is assumed to be even
     """
+    
     min_angle = 0.01 #use a generic gaussian response function below this angle
     def normalize(y, x):
         normalization = np.trapz(y, x)
@@ -204,8 +256,9 @@ def make_deconvolution_matrix(beam_spectrum, powder_pattern, kernel_width):
     num_kernel_points = len(kernel_angles)
 
     scale = lambda theta: 2 * np.tan(theta/2)
-    center_of_mass = np.dot(energy, beam_intensity) / np.sum(beam_intensity)
-    energy_differences = energy - center_of_mass
+    #center_of_mass = np.dot(energy, beam_intensity) / np.sum(beam_intensity)
+    #energy_differences = energy - center_of_mass
+    energy_differences = energy - nominal_energy
     fractional_energy_differences = energy_differences / energy
     #delta = padrl(np.ones((1)), kernel_width, asym = True)
     gaussian = smoothed_peak(size = kernel_width)[1]
@@ -219,3 +272,12 @@ def make_deconvolution_matrix(beam_spectrum, powder_pattern, kernel_width):
     all_kernels = np.array([make_one_kernel(ang) if ang > min_angle else gaussian for ang in angle])
     return np.vstack((np.zeros((num_kernel_points/2, num_kernel_points)),
 all_kernels, np.zeros((num_kernel_points/2 - 1, num_kernel_points))))
+
+def energy_grid(beam_spectrum, central_angle, dtheta, kernel_angles, num_kernel_points):
+    energy, beam_intensity = beam_spectrum
+    center_of_mass = np.dot(energy, beam_intensity) / np.sum(beam_intensity)
+    energy_differences = energy - center_of_mass
+    uncentered_kernel_fractional_energies = np.cumsum(1/np.tan((central_angle + kernel_angles)/2)) * dtheta
+    centered_kernel_fractional_energies = uncentered_kernel_fractional_energies - uncentered_kernel_fractional_energies[num_kernel_points/2]
+    beam_interp = extrap1d(interpolate.interp1d((energy - center_of_mass)[::-1] / energy, beam_intensity))
+    return beam_interp(centered_kernel_fractional_energies)

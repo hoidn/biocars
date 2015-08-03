@@ -1,6 +1,8 @@
+import sys
+from  pathos import multiprocessing 
+import ipdb
 import numpy as np
 import scipy
-import pickle
 import os
 import pdb
 import glob
@@ -22,10 +24,11 @@ import rldeconvolution
 import mu
 from scipy.ndimage.filters import gaussian_filter as filt
 
-#import deconvolution
+import pickle
+import atexit, dill
 
 DATA_DIR = "/media/sf_data/seidler_1506/script_cache"
-PHOTON_ENERGY = 12000.
+PHOTON_ENERGY = 12000. # NOMINAL incident photon energy
 HBARC = 1973. #eV * Angstrom
 
 def mask_peaks_and_iterpolate(x, y, peak_ranges):
@@ -46,6 +49,31 @@ def peak_sizes(x, y, peak_ranges, bg_subtract = True):
         peakIndices = np.where(np.logical_and(x >= peakmin, x <= peakmax))[0]
         sizeList += [np.sum(subtracted[peakIndices])]
     return sizeList
+
+#TODO: these two files are good candidates for a utilities package
+def persist_to_file(file_name):
+
+    try:
+        cache = dill.load(open(file_name, 'r'))
+    except (IOError, ValueError):
+        cache = {}
+
+    atexit.register(lambda: dill.dump(cache, open(file_name, 'w')))
+
+    def decorator(func):
+        #check if function is a closure and if so construct a dict of its bindings
+        if func.func_code.co_freevars:
+            closure_dict = dict(zip(func.func_code.co_freevars, (c.cell_contents for c in func.func_closure)))
+        else:
+            closure_dict = {}
+        def new_func(*args, **kwargs):
+            key = (args, frozenset(kwargs.items()), frozenset(closure_dict.items()))
+            if key not in cache:
+                cache[key] = func(*key[0], **{k: v for k, v in key[1]})
+            return cache[key]
+        return new_func
+
+    return decorator
 
 def memoize(f):
     """ Memoization decorator for functions taking one or more arguments. """
@@ -371,24 +399,12 @@ normalization, bgsub = bgsub, label = glob, scale = scale)
 def radial_mean(filenames, sigma = 1):
     return gaussian_filter(sum_radial_densities(filenames, average = True), sigma = sigma)
 
-#TODO: revamp this!!
-@memoize
+@persist_to_file("cache/dark_subtraction.p")
 def dark_subtraction(npulses, nframes = 1):
-    if not os.path.exists(DATA_DIR + '/dark_sub.p'):
-        lookup_dict = {1: radial_mean("background_exposures/dark_frames/dark_1p*"), 3: radial_mean("background_exposures/dark_frames/dark_3p*"), 10: radial_mean("background_exposures/dark_frames/dark_10p*"), 1000: radial_mean("background_exposures/dark_frames/dark_1000p*")}
-        dark_250_interpolation = (lookup_dict[1000] - lookup_dict[1])/4 + lookup_dict[1]
-        dark_500_interpolation = (lookup_dict[1000] - lookup_dict[1])/2 + lookup_dict[1]
-        dark_2000_interpolation = 2 * lookup_dict[1000] - lookup_dict[1]
-        lookup_dict[250] = dark_250_interpolation
-        lookup_dict[500] = dark_500_interpolation
-        lookup_dict[501] = dark_500_interpolation
-        lookup_dict[2000] = dark_2000_interpolation
-        with open(DATA_DIR + '/dark_sub.p', 'wb') as f:
-            pickle.dump(lookup_dict, f)
-    else:
-        lookup_dict = pickle.load(open(DATA_DIR + '/dark_sub.p', 'rb'))
-
-    return lookup_dict[npulses] * nframes
+    lookup_dict = {1: radial_mean("background_exposures/dark_frames/dark_1p*"), 3: radial_mean("background_exposures/dark_frames/dark_3p*"), 10: radial_mean("background_exposures/dark_frames/dark_10p*"), 1000: radial_mean("background_exposures/dark_frames/dark_1000p*")}
+    def dark_frame(npulses):
+        return (lookup_dict[1000] - lookup_dict[1]) * ((npulses - 1)/999.) + lookup_dict[1]
+    return dark_frame(npulses) * nframes
 
 @memoize
 def air_scatter(npulses, attenuation, nframes = 1):
@@ -437,15 +453,21 @@ def bgsubtract(npulses, attenuation, nframes, kaptonfactor = 1., airfactor = 1.)
 def beam_spectrum(attenuator):
     dat = np.genfromtxt("mda/14IDB_15067.txt")
     beam = [dat.T[1], dat.T[21]]
+    bgsub = default_bgsubtraction(*beam)(beam[0])
+    beam[1] = beam[1] - bgsub
     beam[0] = 1000 * beam[0]
     if attenuator == 'None':
         return beam
     elif attenuator == 'Ag':
         Ag = mu.ElementData(47).mu
         return [beam[0], beam[1] * np.exp(-Ag(beam[0])/12.3)]
+    elif attenuator == 'Ti':
+        Ti = mu.ElementData(22).mu
+        return [beam[0], beam[1] * np.exp(-Ti(beam[0])/30.)]
 
 
-def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2):
+@persist_to_file("cache/full_process.p")
+def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1):
     """
     process image files into radial distributions if necessary, then 
     sum the distributions and deconvolve
@@ -453,11 +475,22 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
     attenuator: == 'None' or 'Ag'
     """
     beam = beam_spectrum(attenuator)
-    nominal_attenuations = {'None': 1, 'Ag': 300}
+    nominal_attenuations = {'None': 1, 'Ag': 300, 'Ti': 10.0}
+    actual_attenuations = {'None': 1., 'Ag': 563., 'Ti': 12.}
     generate_radial_all(glob_pattern)
-    npulses = len(radial_density_paths(glob_pattern))
-    print "npulses: " + str(npulses)
-    angles, intensities = plotAll([glob_pattern], subArray=[bgsubtract(npulses, nominal_attenuations[attenuator], npulses, 0., .0)], normalizationArray=[norm])
+    nframes = len(radial_density_paths(glob_pattern))
+    print "nframes: " + str(nframes)
+    angles, intensities = plotAll([glob_pattern], subArray=[bgsubtract(npulses, nominal_attenuations[attenuator], nframes, 0., .0)], normalizationArray=[npulses * nframes/actual_attenuations[attenuator]], show = False)
     angles = np.deg2rad(angles)
     est = rldeconvolution.make_estimator(angles, filt(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix')
     return est
+
+def process_async(f, tuples_and_dicts):
+    pool = multiprocessing.Pool()
+    return [pool.apply_async(f, *tupdic) for tupdic in tuples_and_dicts]
+
+#if __name__ == '__main__':
+#    cmd = ' '.join(sys.argv[1:])
+#    print cmd
+#    eval(cmd)
+#estAu_300x, estAu10x, estAu1x = process_async(full_process, [[("Au_foil/Thursday/Au_foil_5micron_300x_1000p_*", 'Ag'), {'dtheta': 2e-4, 'npulses': 1000}], [("Au_foil/Thursday/Au_foil_5micron_10x_10p_*", 'Ag'), {'dtheta': 2e-4, 'npulses': 10}], [("Au_foil/Thursday/new_trace/Au_foil_5micron_1x_1p_*", 'Ag'), {'dtheta': 2e-4, 'npulses': 1}]])
