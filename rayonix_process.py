@@ -28,12 +28,14 @@ import utils
 import pickle
 import atexit, dill
 
+
 #center coords of the beam on the ccd
 CENTER = [1984, 1967]
 
 DATA_DIR = "/media/sf_data/seidler_1506/script_cache"
 PHOTON_ENERGY = 12000. # NOMINAL incident photon energy
 HBARC = 1973. #eV * Angstrom
+
 
 def mask_peaks_and_iterpolate(x, y, peak_ranges):
     for peakmin, peakmax in peak_ranges:
@@ -172,13 +174,13 @@ def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = F
     paths = radial_density_paths(directory_glob_pattern)
     extractIntensity = lambda name: np.genfromtxt(name)
     if not average:
-        r, intensity = sum_many(map(extractIntensity, paths))
+        r, intensity = sum_many(utils.parallelmap(extractIntensity, paths))
         if give_tuple:
             return r/len(paths), intensity
         else:
             return intensity
     else:
-        return sum_many(map(extractIntensity, paths))[1]/len(paths)
+        return sum_many(utils.parallelmap(extractIntensity, paths))[1]/len(paths)
 
 
 def generate_radial_all(directory_glob_pattern, recompute = False, center = CENTER):
@@ -194,7 +196,8 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
     if directory_glob_pattern[-5:] != ".mccd":
         directory_glob_pattern = directory_glob_pattern + "*mccd"
     all_mccds = deep_glob(directory_glob_pattern)
-    for mccd in all_mccds:
+    
+    def process_one_frame(mccd):
         radial_path = radial_name(mccd)
         radial_directory = os.path.dirname(radial_path)
         if not os.path.exists(radial_directory):
@@ -203,6 +206,8 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
             #radial = radialSum(np.array(Image.open(mccd)),  center = CENTER)
             radial = radialSum(TIFF.open(mccd, 'r').read_image(),  center = center)
             np.savetxt(radial_path, radial)
+    utils.parallelmap(process_one_frame, all_mccds, 4)
+    #for mccd in all_mccds:
 
 
 def default_bgsubtraction(x, y, endpoint_size = 10, endpoint_right = 10):
@@ -320,20 +325,12 @@ def extrap1d(interpolator):
 
     return ufunclike
 
-def accumulator(func, accum, lst):
-    """
-    higher-order function to perform accumulation
-    """
-    if len(lst) == 0:
-        return accum
-    else:
-        return accumulator(func, func(accum, lst[0]), lst[1:])
 
 
 #to sum numpy arrays without altering shape
 def sum_many(arr1d):
-    return accumulator(operator.add, arr1d[0], arr1d[1:])
-
+    #return accumulator(operator.add, arr1d[0], arr1d[1:])
+    return reduce(operator.add, arr1d)
 
 
 #TODO implement filtering and parallelism
@@ -485,7 +482,7 @@ def beam_spectrum(attenuator):
         return [beam[0], beam[1] * np.exp(-Ti(beam[0])/30.)]
 
 
-@utils.persist_to_file("cache/full_process.p")
+#@utils.persist_to_file("cache/full_process.p")
 def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, **kwargs):
     """
     process image files into radial distributions if necessary, then 

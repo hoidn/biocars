@@ -27,8 +27,6 @@ def hashable_dict(d):
     """
     #TODO: replace type check by check for object's bufferability
     for k, v in d.iteritems():
-        # for some reason ndarray.__hash__ is defined but is None! very strange
-        #if (not isinstance(v, collections.Hashable)) or (not v.__hash__):
         if isinstance(v, np.ndarray):
             d[k] = make_hashable(v)
     return d
@@ -70,8 +68,12 @@ def extrap1d(interpolator):
         else:
             return interpolator(x)
 
-    def ufunclike(xs):
-        return np.array(map(pointwise, np.array(xs)))
+    def ufunclike(x):
+        ys = np.zeros((len(x)))
+        good_indices = np.where(np.logical_and(x > xs[0], x < xs[-1]))[0]
+        ys[good_indices] = interpolator(x[good_indices])
+        return ys
+        #return np.array(map(pointwise, np.array(xs)))
 
     return ufunclike
 
@@ -94,16 +96,7 @@ def convolve_matrix_vector(mat1, arr):
     This determines the number of rows that that the convolution matrix 
     must have
     """
-    #ipdb.set_trace()
-#    width = len(arr) + np.shape(mat1)[1] - 1
-#    if np.shape(mat1)[0] != width:
-#        raise ValueError("wrong number of rows in convolution matrix")
-    #mat is assumed to already have the right dimension
-    #mat2 = stackself(arr, width)
-    #mat1, mat2 = pre_convolution_pad_matrices(mat1, arr)
-    #mat1 = roll_matrix(mat1)
     mat1, mat2 = pre_convolution_mask_matrices(mat1, arr)
-    #convolved = np.sum(mat1 * mat2, axis = 1)
     convolved = np.array([np.dot(row, arr) for row in mat1])
     return pad_spectrum(mat1, convolved)
 
@@ -122,8 +115,8 @@ def pre_convolution_pad_matrices(mat1, mat2):
     if len2 < len1:
         raise ValueError("second dimension of second matrix must be smaller")
     mat2 = np.hstack((np.zeros((len1 - 1)), mat2, np.zeros((len1 - 1))))
-    #mat2 = np.hstack((np.zeros((wid2, len1 - 1)), mat2, np.zeros((wid2, len1 -
     mat1 = np.hstack((mat1, np.zeros((wid1, len2 + len1 - 2))))
+    roll_matrix(mat1)
     return mat1, mat2
 
 def pad_spectrum(mat1, mat2):
@@ -202,20 +195,14 @@ def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolu
     elif convolution_mode == 'matrix':
         kernel_mat = make_deconvolution_matrix([kernelx, kernely], [newx, newy], kernel_width)
         kernel_mat_expanded, newy_expanded = pre_convolution_pad_matrices(kernel_mat, newy)
-        roll_matrix(kernel_mat_expanded)
         #TODO: ascontiguousarray: necessary?
         kernel_mat_expanded_reversed = pre_convolution_pad_matrices(np.ascontiguousarray(np.fliplr(kernel_mat)), newy)[0]
-        roll_matrix(kernel_mat_expanded_reversed)
         #ipdb.set_trace()
         @utils.persist_to_file("cache/estimator.json")
         def estimator(num_iterations, current_estimate = newy_expanded):
-            #current_estimate_unpadded = starting_estimate.copy()
-            #current_estimate = padrl(current_estimate_unpadded, kernel_width, asym = True)
             for i in range(num_iterations):
-                #ipdb.set_trace()
                 convolved_object = convolve_matrix_vector(kernel_mat_expanded, current_estimate)
                 current_estimate = current_estimate * convolve_matrix_vector(kernel_mat_expanded_reversed, newy_expanded/(TINY + convolved_object))
-                #current_estimate_unpadded = unpad_data(current_estimate, kernel_width/2, asym = True)
             return unpad_data(newx, padding_length = len(newx)/3), unpad_data(current_estimate, padding_length = (len(current_estimate) - len(newx)/3)/2, asym = False)
     return estimator
 
@@ -236,8 +223,6 @@ def smoothed_peak_2(mu = 0, sigma = 10):
 
 
 def make_gaussian_kernel(sigma = 10, mu = 0):
-    #func = interpolate.interp1d(x, filt.gaussian_filter(x, sigma))
-    #func = lambda arr: np.array(map(lambda x: np.exp((-x**2)/(2 * sigma)), arr))
     func = lambda arr: np.exp((-(arr - mu)**2)/(2 * sigma**2))
     return func
 
