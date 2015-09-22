@@ -24,8 +24,12 @@ import rldeconvolution
 import mu
 from scipy.ndimage.filters import gaussian_filter as filt
 
+import utils
 import pickle
 import atexit, dill
+
+#center coords of the beam on the ccd
+CENTER = [1984, 1967]
 
 DATA_DIR = "/media/sf_data/seidler_1506/script_cache"
 PHOTON_ENERGY = 12000. # NOMINAL incident photon energy
@@ -50,30 +54,48 @@ def peak_sizes(x, y, peak_ranges, bg_subtract = True):
         sizeList += [np.sum(subtracted[peakIndices])]
     return sizeList
 
-#TODO: these two files are good candidates for a utilities package
-def persist_to_file(file_name):
+# TODO: complete this
+#def find_center(arr2d, start_coords):
+#    """
+#    In a 2d powder pattern, find a local optimal candidate for the center
+#    coordinates of the radial distribution, i.e., the center coordinate for
+#    which the distribution's l2 norm is maximized
+#    """
+#    x0, y0 = CENTER
+#    def l2norm(arr):
+#        theta, intensity = radialSum(arr)
+#        return np.sqrt(np.sum(np.square(intensity - np.mean(intensity))))
+#    to_visit = [start_coords]
+#    norm_start = l2norm(radialSum(arr2d, center = CENTER)
+#    while len(to_visit) > 0:
+#        x, y = start_coords
+#        left, right, top, down = (x - 1, y), (x + 1, y), (x, y + 1), (x, y - 1)
+#        if
 
-    try:
-        cache = dill.load(open(file_name, 'r'))
-    except (IOError, ValueError):
-        cache = {}
-
-    atexit.register(lambda: dill.dump(cache, open(file_name, 'w')))
-
-    def decorator(func):
-        #check if function is a closure and if so construct a dict of its bindings
-        if func.func_code.co_freevars:
-            closure_dict = dict(zip(func.func_code.co_freevars, (c.cell_contents for c in func.func_closure)))
-        else:
-            closure_dict = {}
-        def new_func(*args, **kwargs):
-            key = (args, frozenset(kwargs.items()), frozenset(closure_dict.items()))
-            if key not in cache:
-                cache[key] = func(*key[0], **{k: v for k, v in key[1]})
-            return cache[key]
-        return new_func
-
-    return decorator
+#def persist_to_file(file_name):
+#
+#    try:
+#        with open(file_name, 'rb') as f:
+#            cache = dill.load(f)
+#    except (IOError, ValueError):
+#        cache = {}
+#
+#    atexit.register(lambda: dill.dump(cache, open(file_name, 'w')))
+#
+#    def decorator(func):
+#        #check if function is a closure and if so construct a dict of its bindings
+#        if func.func_code.co_freevars:
+#            closure_dict = dict(zip(func.func_code.co_freevars, (c.cell_contents for c in func.func_closure)))
+#        else:
+#            closure_dict = {}
+#        def new_func(*args, **kwargs):
+#            key = (args, frozenset(kwargs.items()), frozenset(closure_dict.items()))
+#            if key not in cache:
+#                cache[key] = func(*key[0], **{k: v for k, v in key[1]})
+#            return cache[key]
+#        return new_func
+#
+#    return decorator
 
 def memoize(f):
     """ Memoization decorator for functions taking one or more arguments. """
@@ -88,8 +110,6 @@ def memoize(f):
             return ret
     return memodict(f)
 
-#center coords of the beam on the ccd
-CENTER = [1984, 1967]
 
 ## Define an output queue
 #output = mp.Queue()
@@ -147,8 +167,7 @@ def radial_density_paths(directory_glob_pattern):
     radial_paths = map(radial_name, all_mccds)
     return radial_paths
 
-#TODO: make this consistent
-@memoize
+@utils.persist_to_file("cache/sum_radial_densities.p")
 def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = False):
     paths = radial_density_paths(directory_glob_pattern)
     extractIntensity = lambda name: np.genfromtxt(name)
@@ -162,7 +181,7 @@ def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = F
         return sum_many(map(extractIntensity, paths))[1]/len(paths)
 
 
-def generate_radial_all(directory_glob_pattern, recompute = False):
+def generate_radial_all(directory_glob_pattern, recompute = False, center = CENTER):
     """
     given a glob pattern, generate radial distributions for all the matching .mccd files
     """
@@ -182,7 +201,7 @@ def generate_radial_all(directory_glob_pattern, recompute = False):
             os.mkdir(radial_directory)
         if (not os.path.exists(radial_path)) or recompute:
             #radial = radialSum(np.array(Image.open(mccd)),  center = CENTER)
-            radial = radialSum(TIFF.open(mccd, 'r').read_image(),  center = CENTER)
+            radial = radialSum(TIFF.open(mccd, 'r').read_image(),  center = center)
             np.savetxt(radial_path, radial)
 
 
@@ -399,7 +418,7 @@ normalization, bgsub = bgsub, label = glob, scale = scale)
 def radial_mean(filenames, sigma = 1):
     return gaussian_filter(sum_radial_densities(filenames, average = True), sigma = sigma)
 
-@persist_to_file("cache/dark_subtraction.p")
+@utils.persist_to_file("cache/dark_subtraction.p")
 def dark_subtraction(npulses, nframes = 1):
     lookup_dict = {1: radial_mean("background_exposures/dark_frames/dark_1p*"), 3: radial_mean("background_exposures/dark_frames/dark_3p*"), 10: radial_mean("background_exposures/dark_frames/dark_10p*"), 1000: radial_mean("background_exposures/dark_frames/dark_1000p*")}
     def dark_frame(npulses):
@@ -466,8 +485,8 @@ def beam_spectrum(attenuator):
         return [beam[0], beam[1] * np.exp(-Ti(beam[0])/30.)]
 
 
-@persist_to_file("cache/full_process.p")
-def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1):
+@utils.persist_to_file("cache/full_process.p")
+def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, **kwargs):
     """
     process image files into radial distributions if necessary, then 
     sum the distributions and deconvolve
@@ -477,10 +496,12 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
     beam = beam_spectrum(attenuator)
     nominal_attenuations = {'None': 1, 'Ag': 300, 'Ti': 10.0}
     actual_attenuations = {'None': 1., 'Ag': 563., 'Ti': 12.}
-    generate_radial_all(glob_pattern)
+    generate_radial_all(glob_pattern, center = center)
     nframes = len(radial_density_paths(glob_pattern))
+    if nframes == 0:
+        raise ValueError(glob_pattern +  ": no matching files found")
     print "nframes: " + str(nframes)
-    angles, intensities = plotAll([glob_pattern], subArray=[bgsubtract(npulses, nominal_attenuations[attenuator], nframes, 0., .0)], normalizationArray=[npulses * nframes/actual_attenuations[attenuator]], show = False)
+    angles, intensities = plotAll([glob_pattern], subArray=[bgsubtract(npulses, nominal_attenuations[attenuator], nframes, 0., .0)], normalizationArray=[actual_attenuations[attenuator]/(npulses * nframes)], show = False)
     angles = np.deg2rad(angles)
     est = rldeconvolution.make_estimator(angles, filt(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix')
     return est
