@@ -1,5 +1,4 @@
 import sys
-from  pathos import multiprocessing 
 import ipdb
 import numpy as np
 import scipy
@@ -8,7 +7,6 @@ import pdb
 import glob
 from PIL import Image
 import matplotlib.pyplot as plt
-from multiprocessing import Pool
 from scipy import interpolate
 from scipy.interpolate import interp1d
 from scipy.ndimage.filters import gaussian_filter
@@ -17,7 +15,6 @@ import operator
 import fnmatch
 from  libtiff import TIFF
 
-import multiprocessing as mp
 import random
 import string
 import rldeconvolution
@@ -213,14 +210,15 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
 def default_bgsubtraction(x, y, endpoint_size = 10, endpoint_right = 10):
     bgx = np.concatenate((x[:endpoint_size], x[-endpoint_right:]))
     bgy = np.concatenate((y[:endpoint_size], y[-endpoint_right:]))
-    interp_func = extrap1d(interp1d(bgx, bgy))
+    interp_func = rldeconvolution.extrap1d(interp1d(bgx, bgy))
     return interp_func
 
 #normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which
 #normalization is desired.
 #TODO: smooth. why doesn't it work?
-def plot(radial_distribution, normalization = None, bgsub = None, label = None,
-smooth = 1, scale = 'angle'):
+def process_radial_distribution(radial_distribution, normalization = None,
+    bgsub = None, label = None, plot = False,
+    smooth = 1, scale = 'angle'):
     """
     bgsub is a function that takes x and y coordinates and returns an interpolation that
     yields background subtraction as a function of x
@@ -230,7 +228,7 @@ smooth = 1, scale = 'angle'):
     def default_bgsubtraction(x, y, endpoint_size = 10, endpoint_right = 10):
         bgx = np.concatenate((x[:endpoint_size], x[-endpoint_right:]))
         bgy = np.concatenate((y[:endpoint_size], y[-endpoint_right:]))
-        interp_func = extrap1d(interp1d(bgx, bgy))
+        interp_func = rldeconvolution.extrap1d(interp1d(bgx, bgy))
         return interp_func
 
     if bgsub is None:
@@ -243,7 +241,8 @@ smooth = 1, scale = 'angle'):
         plt.legend()
         plt.show()
 
-    def plotOne(label):
+    # TODO: refactor
+    def rescale_data(label):
         r, intensity = radial_distribution
         #intensity -= bgsub
         orig_intensity = intensity.copy()
@@ -253,78 +252,51 @@ smooth = 1, scale = 'angle'):
         elif isinstance(normalization, (int, long, float)):
             interpolated = interpolate.interp1d(r, intensity)
             orig_interpolated = interpolate.interp1d(r, orig_intensity)
-            #normval = interpolated(normalization)
-            #normval = orig_interpolated(normalization)
             intensity *= normalization
         if scale == 'q':
             qq = 2 * PHOTON_ENERGY * np.sin(np.deg2rad(r/2))/HBARC
-            plt.plot(qq, gaussian_filter(intensity, smooth), label = label)
+            if plot:
+                plt.plot(qq, gaussian_filter(intensity, smooth), label = label)
             return qq, intensity
         if scale == 'angle':
-            plt.plot(r, gaussian_filter(intensity, smooth), label = label)
+            if plot:
+                plt.plot(r, gaussian_filter(intensity, smooth), label = label)
             return r, intensity
         else:
             raise ValueError("invalid key: " +  str(scale))
-    return plotOne(label)
+    return rescale_data(label)
 
 
 
-#TODO implement filtering and parallelism
-def parallel_sum_images(filename_list, num_cores, filter = None):
-    def partition_list(lst):
-        stride = len(lst)/num_cores
-        sublists = [lst[i * stride: (i + 1) * stride] for i in xrange(num_cores)]
-        return sublists
-    def single_threaded_sum(lst, output):
-        if len(filename_list) < 1:
-            raise ValueError("need at least one file")
-        imsum = np.array(Image.open(filename_list[0]))
-        if len(filename_list) == 1:
-            return imsum
-        for fname in filename_list[1:]:
-            imsum += np.array(Image.open(filename_list[0]))
-        output.put(imsum)
-    output = mp.Queue()
-    processes = [mp.Process(target=single_threaded_sum, args=(filenames, output)) for filenames in filename_list]
-
-    # Run processes
-    for p in processes:
-        p.start()
-
-    # Exit the completed processes
-    for p in processes:
-        p.join()
-    sub_sums = np.array([output.get() for p in processes])
-    #pool = Pool(processes = num_cores)
-    #sub_sums = pool.map(single_threaded_sum, partition_list(filename_list))
-    return sum_many(sub_sums)
-
-def extrap1d(interpolator):
-    xs = interpolator.x
-    ys = interpolator.y
-
-#    def pointwise(x):
-#        if x < xs[0]:
-#            return ys[0]+(x-xs[0])*(ys[1]-ys[0])/(xs[1]-xs[0])
-#        elif x > xs[-1]:
-#            return ys[-1]+(x-xs[-1])*(ys[-1]-ys[-2])/(xs[-1]-xs[-2])
-#        else:
-#            return interpolator(x)
-
-
-    def pointwise(x):
-        if x < xs[0]:
-            return 0.
-        elif x > xs[-1]:
-            return 0.
-        else:
-            return interpolator(x)
-
-    def ufunclike(xs):
-        return array(map(pointwise, array(xs)))
-
-    return ufunclike
-
+##TODO implement filtering and parallelism
+#def parallel_sum_images(filename_list, num_cores, filter = None):
+#    def partition_list(lst):
+#        stride = len(lst)/num_cores
+#        sublists = [lst[i * stride: (i + 1) * stride] for i in xrange(num_cores)]
+#        return sublists
+#    def single_threaded_sum(lst, output):
+#        if len(filename_list) < 1:
+#            raise ValueError("need at least one file")
+#        imsum = np.array(Image.open(filename_list[0]))
+#        if len(filename_list) == 1:
+#            return imsum
+#        for fname in filename_list[1:]:
+#            imsum += np.array(Image.open(filename_list[0]))
+#        output.put(imsum)
+#    output = mp.Queue()
+#    processes = [mp.Process(target=single_threaded_sum, args=(filenames, output)) for filenames in filename_list]
+#
+#    # Run processes
+#    for p in processes:
+#        p.start()
+#
+#    # Exit the completed processes
+#    for p in processes:
+#        p.join()
+#    sub_sums = np.array([output.get() for p in processes])
+#    #pool = Pool(processes = num_cores)
+#    #sub_sums = pool.map(single_threaded_sum, partition_list(filename_list))
+#    return sum_many(sub_sums)
 
 
 #to sum numpy arrays without altering shape
@@ -376,7 +348,7 @@ def swap(arr1d, centerindx):
 
 
 
-def plotAll(glob_patterns, show = True, individual = False, subArray = None,
+def process_all_globs(glob_patterns, show = False, individual = False, subArray = None,
 normalization = "peak", normalizationArray = None, labelList = None, filterList
 = None, recompute = False, scale = 'angle'):
     if subArray is None:
@@ -387,27 +359,15 @@ normalization = "peak", normalizationArray = None, labelList = None, filterList
         filterList = [None] * len(glob_patterns)
     if normalizationArray is None:
         normalizationArray = [None] * len(glob_patterns)
-#    def run_and_plot(glob, bgsub = None, label = None, data_filter = None, normalization = None):
-#        run = Run(glob, data_filter = data_filter, recompute = recompute)
-#        run.plot(bgsub = bgsub, normalization = normalization, label = label)
-#        return run
     def run_and_plot(glob, bgsub = None, label = None, data_filter = None, normalization = None):
-        return plot(sum_radial_densities(glob, False, True), normalization =
-normalization, bgsub = bgsub, label = glob, scale = scale)
-#    if individual is True:
-#        #TODO: support kwargs
-#        for patt in glob_patterns:
-#            if patt[-5:] != ".mccd":
-#                patt = patt + "*.mccd"
-#            fileList = glob.glob(patt)
-#            runs = map(run_and_plot, fileList)
-#            runs[-1].show()
-#    else:
+        return process_radial_distribution(sum_radial_densities(glob, False, True), normalization =
+normalization, bgsub = bgsub, label = glob, scale = scale, plot = show)
     outputs = []
     for patt, subtraction, label, one_filter, norm in zip(glob_patterns, subArray, labelList, filterList, normalizationArray):
        outputs = outputs + [run_and_plot(patt, bgsub = subtraction, label = label, data_filter = one_filter, normalization = norm)]
-    plt.legend()
-    plt.show(block = False)
+    if show:
+        plt.legend()
+        plt.show(block = False)
     #output format: angles, intensities, angles, intensities, etc.
     return np.vstack((_ for _ in outputs))
 
@@ -463,7 +423,7 @@ def bgsubtract(npulses, attenuation, nframes, kaptonfactor = 1., airfactor = 1.)
     airsub = airfactor * air_scatter(npulses, attenuation, nframes)
     #kaptonsub = kaptonfactor * kapton_background(npulses, attenuation, nframes)
     kaptonsub = kaptonfactor * kapton_only(npulses, attenuation, nframes)
-    interp_func = lambda x, y: extrap1d(interp1d(x, kaptonsub + darksub + airsub))
+    interp_func = lambda x, y: rldeconvolution.extrap1d(interp1d(x, kaptonsub + darksub + airsub))
     return interp_func
 
 def beam_spectrum(attenuator):
@@ -475,15 +435,15 @@ def beam_spectrum(attenuator):
     if attenuator == 'None':
         return beam
     elif attenuator == 'Ag':
-        Ag = mu.ElementData(47).mu
+        Ag = mu.ElementData(47).sigma
         return [beam[0], beam[1] * np.exp(-Ag(beam[0])/12.3)]
     elif attenuator == 'Ti':
-        Ti = mu.ElementData(22).mu
+        Ti = mu.ElementData(22).sigma
         return [beam[0], beam[1] * np.exp(-Ti(beam[0])/30.)]
 
 
-#@utils.persist_to_file("cache/full_process.p")
-def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, **kwargs):
+@utils.persist_to_file("cache/full_process.p")
+def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, **kwargs):
     """
     process image files into radial distributions if necessary, then 
     sum the distributions and deconvolve
@@ -498,14 +458,11 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
     if nframes == 0:
         raise ValueError(glob_pattern +  ": no matching files found")
     print "nframes: " + str(nframes)
-    angles, intensities = plotAll([glob_pattern], subArray=[bgsubtract(npulses, nominal_attenuations[attenuator], nframes, 0., .0)], normalizationArray=[actual_attenuations[attenuator]/(npulses * nframes)], show = False)
+    angles, intensities = process_all_globs([glob_pattern], subArray=[bgsubtract(npulses, nominal_attenuations[attenuator], nframes, kaptonfactor =  kaptonfactor, airfactor = airfactor)], normalizationArray=[actual_attenuations[attenuator]/(npulses * nframes)], show = False)
     angles = np.deg2rad(angles)
     est = rldeconvolution.make_estimator(angles, filt(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix')
     return est
 
-def process_async(f, tuples_and_dicts):
-    pool = multiprocessing.Pool()
-    return [pool.apply_async(f, *tupdic) for tupdic in tuples_and_dicts]
 
 #if __name__ == '__main__':
 #    cmd = ' '.join(sys.argv[1:])

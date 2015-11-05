@@ -185,7 +185,7 @@ def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolu
     newy_padded = padrl(newy, kernel_width)
     if convolution_mode == 'vector':
         kernel_y_reversed = kernel_y[::-1]
-        @utils.persist_to_file("cache/estimator.json")
+        @utils.eager_persist_to_file("cache/estimator_vector.p")
         def estimator(num_iterations, starting_estimate = newy):
             current_estimate = starting_estimate.copy()
             for i in range(num_iterations):
@@ -198,7 +198,7 @@ def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolu
         #TODO: ascontiguousarray: necessary?
         kernel_mat_expanded_reversed = pre_convolution_pad_matrices(np.ascontiguousarray(np.fliplr(kernel_mat)), newy)[0]
         #ipdb.set_trace()
-        @utils.persist_to_file("cache/estimator.json")
+        @utils.eager_persist_to_file("cache/estimator_matrix/prefix")
         def estimator(num_iterations, current_estimate = newy_expanded):
             for i in range(num_iterations):
                 convolved_object = convolve_matrix_vector(kernel_mat_expanded, current_estimate)
