@@ -1,6 +1,6 @@
 from distutils.core import setup
 
-setup(name='rldeconvolution',
+setup(name='biocars',
       version='1.0',
-      py_modules=['rldeconvolution'],
+      py_modules=['biocars/rldeconvolution', 'biocars/rldeconvolution', 'biocars/transmission'],
       )
