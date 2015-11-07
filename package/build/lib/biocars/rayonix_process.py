@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from scipy.ndimage.filters import gaussian_filter
 from scipy import arange, array, exp
+from scipy.optimize import minimize_scalar
 import operator
 import fnmatch
 from  libtiff import TIFF
@@ -19,12 +20,26 @@ import re
 
 import rldeconvolution
 
-# TODO: install these packages as a dependencies
 import mu
 import utils
 
 import pickle
 import atexit, dill
+
+def make_attenuation_function(element, scale):
+    """
+    element: an element identifier (either atomic number or 1 or 2 letter abbreviation)
+    scale: a fit parameter that corresponds (but is not equal) to the thickness
+    """
+    return lambda energies: np.exp(-(mu.ElementData(element).sigma)(energies)/scale)
+
+def solve_scale(element, transmission):
+    gridpoints = 500
+    energies, intensities = beam_spectrum(1) # unattenuated beam profile
+    myfunc = lambda scale: np.exp(-(mu.ElementData(element).sigma)(energies)/scale) 
+    deviation = lambda scale: abs(transmission - np.sum(myfunc(energies) * intensities)/np.sum(intensities))
+    res = minimize_scalar(deviation)
+    return res
 
 
 #center coords of the beam on the ccd
@@ -34,14 +49,24 @@ DATA_DIR = "/media/sf_data/seidler_1506/script_cache"
 PHOTON_ENERGY = 12000. # NOMINAL incident photon energy
 HBARC = 1973. #eV * Angstrom
 
-attfunc_Ag = lambda energies: np.exp(-(mu.ElementData(47).sigma)(energies)/12.3)
-attfunc_Ti = lambda energies: np.exp(-(mu.ElementData(22).sigma)(energies)/30.)
-ATTENUATION_FUNCTIONS =\
-    {'Ag': attfunc_Ag,
-    'Ti': attfunc_Ti,
-    300: attfunc_Ag,
-    10: attfunc_Ti}
+#attfunc_Ag = lambda energies: np.exp(-(mu.ElementData(47).sigma)(energies)/12.3)
+#attfunc_Ti = lambda energies: np.exp(-(mu.ElementData(22).sigma)(energies)/30.)
+attfunc_Ag = make_attenuation_function(47, 12.3)
+attfunc_Ti = make_attenuation_function(22, 30.)
 
+ATTENUATION_FUNCTIONS =\
+    {300: attfunc_Ag,
+    10: attfunc_Ti,
+    74: attfunc_Ag,
+    32: attfunc_Ti}
+
+actual_attenuations =\
+    {'None': 1.,
+    1: 1.,
+    300: 563.,# Ag
+    10: 12.,# Ti
+    74: 74.,
+    32: 32.}
 
 def mask_peaks_and_iterpolate(x, y, peak_ranges):
     for peakmin, peakmax in peak_ranges:
@@ -163,6 +188,9 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
     all_mccds = deep_glob(directory_glob_pattern)
     
     def process_one_frame(mccd):
+        """
+        Radially integrate a frame and save the result to file
+        """
         radial_path = radial_name(mccd)
         radial_directory = os.path.dirname(radial_path)
         if not os.path.exists(radial_directory):
@@ -171,7 +199,7 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
             #radial = radialSum(np.array(Image.open(mccd)),  center = CENTER)
             radial = radialSum(TIFF.open(mccd, 'r').read_image(),  center = center)
             np.savetxt(radial_path, radial)
-    utils.parallelmap(process_one_frame, all_mccds, 4)
+    utils.parallelmap(process_one_frame, all_mccds)
 
 def default_bgsubtraction(x, y, endpoint_size = 10, endpoint_right = 10):
     """
@@ -381,7 +409,7 @@ def beam_spectrum(attenuator):
     bgsub = default_bgsubtraction(*beam)(beam[0])
     beam[1] = beam[1] - bgsub
     beam[0] = 1000 * beam[0]
-    if attenuator == 'None':
+    if (attenuator == 'None') or (attenuator == 1):
         return beam
     else:
         attenuation = ATTENUATION_FUNCTIONS[attenuator]
@@ -414,9 +442,8 @@ def glob_attenuator(glob_pattern):
         print 'attenuation ', attenuation
         return attenuation
 
-# TODO: does caching work here?
-@utils.persist_to_file("cache/full_process.p")
-def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, **kwargs):
+@utils.eager_persist_to_file("cache/full_process/")
+def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0., **kwargs):
     """
     process image files into radial distributions if necessary, then 
     sum the distributions and deconvolve
@@ -424,9 +451,6 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
     attenuator: == 'None' or 'Ag'
     """
     #nominal_attenuations = {'None': 1, 'Ag': 300, 'Ti': 10.0}
-    actual_attenuations = {'None': 1., 'Ag': 563., 'Ti': 12.}
-    actual_attenuations[10] = actual_attenuations['Ti']
-    actual_attenuations[300] = actual_attenuations['Ag']
     beam = beam_spectrum(attenuator)
     generate_radial_all(glob_pattern, center = center)
     nframes = glob_nframes(glob_pattern)
@@ -437,25 +461,35 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
     angles = np.deg2rad(angles)
     # zero negative values
     intensities[intensities < 0] = 0.
-    est = rldeconvolution.make_estimator(angles, gaussian_filter(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix')
+    est = rldeconvolution.make_estimator(angles, gaussian_filter(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix', smooth_size = smooth_size)
     return est
 
-def process_and_plot(pattern_list, deconvolution_iterations = 100, plot = True, show = True, dtheta = 1e-3, filtsize = 2, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0):
+def process_and_plot(pattern_list, deconvolution_iterations = 100, plot = True, show = True, dtheta = 5e-4, filtsize = 2, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0.0, peaknormalize = False):
     """
     Process data specified by glob patterns in pattern_list, using the
     parameters extracted from the filepath prefix
     """
     def one_spectrum(pattern):
+#        if isinstance(element, tuple):
+#            pattern, normalization = element
+#        else: # element is a string
+#            pattern = element 
         npulses = glob_npulses(pattern)
         estimator = full_process(pattern, glob_attenuator(pattern), dtheta = dtheta,
             filtsize = filtsize, npulses = npulses, center = center, airfactor = airfactor,
-            kaptonfactor = kaptonfactor)
-        return estimator(deconvolution_iterations)
+            kaptonfactor = kaptonfactor, smooth_size = smooth_size)
+        x, y = estimator(deconvolution_iterations)
+        if peaknormalize:
+            return [x, y/np.max(y)]
+        else:
+            return x, y
     spectra = [one_spectrum(pattern) for pattern in pattern_list]
     if plot:
         for pattern, curve in zip(pattern_list, spectra):
             plt.plot(*curve, label = pattern)
         plt.legend()
+        plt.xlabel('Angle (rad)')
+        plt.ylabel('Intensity (arb)')
     if show:
         plt.show()
     return spectra
