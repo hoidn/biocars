@@ -163,9 +163,6 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
     all_mccds = deep_glob(directory_glob_pattern)
     
     def process_one_frame(mccd):
-        """
-        Radially integrate a frame and save the result to file
-        """
         radial_path = radial_name(mccd)
         radial_directory = os.path.dirname(radial_path)
         if not os.path.exists(radial_directory):
@@ -174,7 +171,7 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
             #radial = radialSum(np.array(Image.open(mccd)),  center = CENTER)
             radial = radialSum(TIFF.open(mccd, 'r').read_image(),  center = center)
             np.savetxt(radial_path, radial)
-    utils.parallelmap(process_one_frame, all_mccds)
+    utils.parallelmap(process_one_frame, all_mccds, 4)
 
 def default_bgsubtraction(x, y, endpoint_size = 10, endpoint_right = 10):
     """
@@ -419,7 +416,7 @@ def glob_attenuator(glob_pattern):
 
 # TODO: does caching work here?
 @utils.persist_to_file("cache/full_process.p")
-def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0., **kwargs):
+def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, **kwargs):
     """
     process image files into radial distributions if necessary, then 
     sum the distributions and deconvolve
@@ -440,10 +437,10 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
     angles = np.deg2rad(angles)
     # zero negative values
     intensities[intensities < 0] = 0.
-    est = rldeconvolution.make_estimator(angles, gaussian_filter(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix', smooth_size = smooth_size)
+    est = rldeconvolution.make_estimator(angles, gaussian_filter(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix')
     return est
 
-def process_and_plot(pattern_list, deconvolution_iterations = 100, plot = True, show = True, dtheta = 1e-3, filtsize = 2, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0.0):
+def process_and_plot(pattern_list, deconvolution_iterations = 100, plot = True, show = True, dtheta = 1e-3, filtsize = 2, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0):
     """
     Process data specified by glob patterns in pattern_list, using the
     parameters extracted from the filepath prefix
@@ -452,7 +449,7 @@ def process_and_plot(pattern_list, deconvolution_iterations = 100, plot = True, 
         npulses = glob_npulses(pattern)
         estimator = full_process(pattern, glob_attenuator(pattern), dtheta = dtheta,
             filtsize = filtsize, npulses = npulses, center = center, airfactor = airfactor,
-            kaptonfactor = kaptonfactor, smooth_size = smooth_size)
+            kaptonfactor = kaptonfactor)
         return estimator(deconvolution_iterations)
     spectra = [one_spectrum(pattern) for pattern in pattern_list]
     if plot:
