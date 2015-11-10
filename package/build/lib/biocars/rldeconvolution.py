@@ -162,6 +162,7 @@ def unpad_data(arr, padding_length = None, endpoint_length = 10, asym = False):
     else:
         return arr[padding_length:-padding_length]
 
+# TODO: crashes when convolution_mode == 'vector'
 def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolution_mode = 'vector', regrid = True, kernel_width = 1600, smooth_size = 1.):
     """
     return a function that takes a number of iterations and an optional starting estimate for the "real" spectrum and returns an improved estimate
@@ -206,6 +207,10 @@ def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolu
                 current_estimate = filt.gaussian_filter(current_estimate, smooth_size)
             return unpad_data(newx, padding_length = len(newx)/3), unpad_data(current_estimate, padding_length = (len(current_estimate) - len(newx)/3)/2, asym = False)
     return estimator
+
+@utils.eager_persist_to_file("cache/deconvolve/")
+def deconvolve(measuredx, measuredy, kernelx, kernely, grid_spacing, convolution_mode = 'vector', regrid = True, kernel_width = 1600, smooth_size = 1., deconvolution_iterations = 100):
+    return make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolution_mode = convolution_mode, regrid = regrid, kernel_width = kernel_width, smooth_size = smooth_size)(deconvolution_iterations)
 
 def smoothed_step(sigma = 10):
     y = np.concatenate((np.zeros(100), np.ones(100)))
