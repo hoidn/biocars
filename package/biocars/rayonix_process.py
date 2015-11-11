@@ -53,8 +53,9 @@ nominal_attenuations = {v: k for k, v in actual_attenuations.items()}
 measured_background_params = [(100, 300), (250, 300), (400, 300), (500, 300),
     (100, 74), (50, 74), (50, 32), (10, 10), (1, 3), (3, 3), (2, 3), (4, 3),
     (8, 3), (16, 3), (32, 3), (64, 3), (128, 3), (1, 1), (5, 1), (10, 1),
-    (2, 1), (4, 1), (8, 1)]
-AIR_SCATTERN_PATTERN = 'air_scatter_copied/%dp_%dx_as*' 
+    (2, 1), (4, 1), (8, 1), (1, 1.5), (1, 4.5), (1, 7), (1, 2.5), (2, 2.5), (4, 2.5), (8, 2.5),
+    (2, 4.5), (4, 4.5), (8, 4.5)]
+AIR_SCATTERN_PATTERN = 'air_scatter_copied/%dp_%sx_as*' 
 
 def open_mccd(filepath):
     """
@@ -239,7 +240,7 @@ def radial_density_paths(directory_glob_pattern):
     return radial_paths
 
 @utils.persist_to_file("cache/sum_radial_densities.p")
-def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = False):
+def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = False, ncores = None):
     """
     Sum or average radial density profiles
 
@@ -251,7 +252,7 @@ def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = F
     Returns the summed radial profile
     """
     paths = radial_density_paths(directory_glob_pattern)
-    generate_radial_all(directory_glob_pattern)
+    generate_radial_all(directory_glob_pattern, ncores = ncores)
     extractIntensity = lambda name: np.genfromtxt(name)
     if not average:
         r, intensity = sum_many(utils.parallelmap(extractIntensity, paths))
@@ -265,7 +266,7 @@ def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = F
 
 
 @utils.eager_persist_to_file("cache/generate_radial_all/")
-def generate_radial_all(directory_glob_pattern, recompute = False, center = CENTER):
+def generate_radial_all(directory_glob_pattern, recompute = False, center = CENTER, ncores = None):
     """
     Given a glob pattern, generate radial distributions for all the matching .mccd files.
 
@@ -295,7 +296,7 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
             img =  open_mccd(mccd)
             radial = radialSum(img,  center = center)
             np.savetxt(radial_path, radial)
-    utils.parallelmap(process_one_frame, all_mccds)
+    utils.parallelmap(process_one_frame, all_mccds, nodes = ncores)
 
 
 #normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which
@@ -408,7 +409,7 @@ def radialSum(data, distance = 140000., pixSize = 88.6, center = CENTER):
 
 def process_all_globs(glob_patterns, show = False, individual = False, subArray = None,
 normalization = "peak", normalizationArray = None, labelList = None, filterList
-= None, recompute = False, scale = 'angle'):
+= None, recompute = False, scale = 'angle', ncores = None):
     """
     Return scaled, background-subtracted, and normalized powder patterns for data
     corresponding to each pattern in glob_patterns
@@ -422,7 +423,7 @@ normalization = "peak", normalizationArray = None, labelList = None, filterList
     if normalizationArray is None:
         normalizationArray = [None] * len(glob_patterns)
     def run_and_plot(glob, bgsub = None, label = None, data_filter = None, normalization = None):
-        return process_radial_distribution(sum_radial_densities(glob, False, True), normalization =
+        return process_radial_distribution(sum_radial_densities(glob, False, True, ncores = ncores), normalization =
 normalization, bgsub = bgsub, label = glob, scale = scale, plot = show)
     outputs = []
     for patt, subtraction, label, one_filter, norm in zip(glob_patterns, subArray, labelList, filterList, normalizationArray):
@@ -433,7 +434,7 @@ normalization, bgsub = bgsub, label = glob, scale = scale, plot = show)
     #output format: angles, intensities, angles, intensities, etc.
     return np.vstack((_ for _ in outputs))
 
-def radial_mean(filenames, sigma = 1):
+def radial_mean(filenames, sigma = 1, ncores = None):
     return gaussian_filter(sum_radial_densities(filenames, average = True), sigma = sigma)
 
 @utils.persist_to_file("cache/dark_subtraction.p")
@@ -505,7 +506,7 @@ def air_scatter2(npulses, attenuation, nframes = 1, filtersize = 10):
         BACKGROUND_DICT[(npulses, attenuation)] = extractor_function(globpattern)
     for pair in measured_background_params:
         add_background_dict_entry(pair[0], pair[1], radial_mean)
-    def extract_intensity():
+    def extract_intensity(npulses, attenuation):
         unsubtracted = BACKGROUND_DICT[(npulses, attenuation)]
         #raw =  np.genfromtxt(path)[1]
         #return raw - dark_subtraction(npulses_ref)
@@ -514,10 +515,10 @@ def air_scatter2(npulses, attenuation, nframes = 1, filtersize = 10):
         npulses_intepolation = 10
         attenuation_interpolation = 10
         return nframes * (npulses/npulses_intepolation) *\
-            extract_intensity() * actual_attenuations[attenuation_interpolation]/ actual_attenuations[attenuation]
+            extract_intensity(npulses_intepolation, attenuation_interpolation) * actual_attenuations[attenuation_interpolation]/ actual_attenuations[attenuation]
     if (npulses, attenuation) in BACKGROUND_DICT:
         print "found air scatter data: ", (npulses, attenuation)
-        return nframes * extract_intensity()
+        return nframes * extract_intensity(npulses, attenuation)
     else:
         #raise ValueError("air scatter data not found") #debug
         print "interpolating air scatter data"
@@ -599,7 +600,7 @@ def glob_attenuator(glob_pattern):
         return attenuation
 
 @utils.eager_persist_to_file("cache/full_process/")
-def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0.3, deconvolution_iterations = 100, **kwargs):
+def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0.3, deconvolution_iterations = 100, ncores = None, **kwargs):
     """
     process image files into radial distributions if necessary, then 
     sum the distributions and deconvolve
@@ -607,12 +608,12 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
     attenuator: == 'None' or 'Ag'
     """
     beam = beam_spectrum(attenuator)
-    generate_radial_all(glob_pattern, center = center)
+    generate_radial_all(glob_pattern, center = center, ncores = ncores)
     nframes = glob_nframes(glob_pattern)
     if nframes == 0:
         raise ValueError(glob_pattern +  ": no matching files found")
     print "nframes: " + str(nframes)
-    angles, intensities = process_all_globs([glob_pattern], subArray=[bgsubtract(npulses, actual_attenuations[attenuator], nframes, kaptonfactor =  kaptonfactor, airfactor = airfactor)], normalizationArray=[actual_attenuations[attenuator]/(npulses * nframes)], show = False)
+    angles, intensities = process_all_globs([glob_pattern], subArray=[bgsubtract(npulses, actual_attenuations[attenuator], nframes, kaptonfactor =  kaptonfactor, airfactor = airfactor)], normalizationArray=[actual_attenuations[attenuator]/(npulses * nframes)], show = False, ncores = ncores)
     angles = np.deg2rad(angles)
     # zero negative values
     intensities[intensities < 0] = 0.
@@ -662,6 +663,7 @@ def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder =
         else:
             return x, y
     spectra = [one_spectrum(pattern) for pattern in pattern_list]
+    #spectra = utils.parallelmap(one_spectrum, pattern_list)
 
 #    def relative_peak_integrals():
 #        """
