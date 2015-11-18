@@ -18,6 +18,7 @@ from  libtiff import TIFF
 import random
 import string
 import re
+#from matplotlib import cm
 
 import rldeconvolution
 
@@ -28,6 +29,7 @@ import pickle
 import atexit, dill
 
 # TODO: move these data to a different module
+# TODO: attenuation factors for the Al filters
 
 # map nominal attenuation values to actual
 actual_attenuations =\
@@ -63,10 +65,7 @@ def open_mccd(filepath):
     array.
     """
     img = TIFF.open(filepath, 'r').read_image()
-    # get rid of overflows
-    # TODO: this is only temporary. We should deal with overflows by
-    # using interpolated values or by excluding those pixels from the
-    # radial sum
+    # get rid of outying pixel values
     # TODO: make the threshold paramater adjustable?
     threshold = 20. * np.std(img)
     mean = np.mean(img)
@@ -137,22 +136,9 @@ CENTER = [1984, 1967]
 PHOTON_ENERGY = 12000. # NOMINAL incident photon energy
 HBARC = 1973. #eV * Angstrom
 
-#attfunc_Ag = make_attenuation_function(47, 12.3)
-#attfunc_Ti = make_attenuation_function(22, 30.)
-
-#ATTENUATION_FUNCTIONS =\
-#    {300: attfunc_Ag,
-#    10: attfunc_Ti,
-#    74: attfunc_Ag,
-#    32: attfunc_Ti}
-
-
-
 # Define filter transmission functions
 Alfoil_thickness = 17e-4 # speculative
 ATTENUATION_FUNCTIONS = {}
-#ATTENUATION_FUNCTIONS[300] = make_attenuation_function_from_transmission(47, 1./actual_attenuations[300])
-#ATTENUATION_FUNCTIONS[10] = make_attenuation_function_from_transmission(22, 1./actual_attenuations[10])
 ATTENUATION_FUNCTIONS[2] = make_attenuation_function_from_thickness('Al', 6 * Alfoil_thickness)
 ATTENUATION_FUNCTIONS[1.5] = make_attenuation_function_from_thickness('Al', 4 * Alfoil_thickness)
 ATTENUATION_FUNCTIONS[2.5] = make_attenuation_function_from_thickness('Al', 8 * Alfoil_thickness)
@@ -167,11 +153,6 @@ ATTENUATION_FUNCTIONS[4.5] = lambda energies: make_attenuation_function_from_thi
 ATTENUATION_FUNCTIONS[32] = lambda energies: ATTENUATION_FUNCTIONS[3](energies) * ATTENUATION_FUNCTIONS[10](energies)
 ATTENUATION_FUNCTIONS[74] = lambda energies: ATTENUATION_FUNCTIONS[7](energies) * ATTENUATION_FUNCTIONS[10](energies)
 
-#ATTENUATION_FUNCTIONS =\
-#    {300: make_attenuation_function_from_transmission(47, 1./actual_attenuations(300)),
-#    10: make_attenuation_function_from_transmission(22, 1./actual_attenuations(10)),
-#    74: make_attenuation_function_from_transmission(22, 1./actual_attenuations(74)),# temporary dummy value
-#    32: make_attenuation_function_from_transmission(22, 1./actual_attenuations(32))}# temporary dummy value
 
 def mask_peaks_and_iterpolate(x, y, peak_ranges):
     for peakmin, peakmax in peak_ranges:
@@ -301,7 +282,6 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
 
 #normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which
 #normalization is desired.
-#TODO: smooth. why doesn't it work?
 def process_radial_distribution(radial_distribution, normalization = None,
     bgsub = None, label = None, plot = False,
     smooth = 1, scale = 'angle'):
@@ -356,27 +336,6 @@ def sum_many(arr1d):
     return reduce(operator.add, arr1d)
 
 
-##TODO implement filtering and parallelism
-#def sumImages(filename_list, filter = None):
-#    """
-#    Sum a bunch of images
-#    Input: a list of filenames.
-#    Returns the summed images as a numpy array
-#    """
-##    def partition_list(lst):
-##        stride = len(lst)/num_cores
-##        sublists = [lst[i * stride: (i + 1) * stride] for i in xrange(num_cores)]
-##        return sublists
-#    if len(filename_list) < 1:
-#        raise ValueError("need at least one file")
-#    imsum = np.array(Image.open(filename_list[0]))
-#    if len(filename_list) == 1:
-#        return imsum
-#    for fname in filename_list[1:]:
-#        imsum += np.array(Image.open(filename_list[0]))
-#    return imsum
-
-
 def radialSum(data, distance = 140000., pixSize = 88.6, center = CENTER):
     """
     Perform an azimuthal integration of a 2d array.
@@ -389,8 +348,6 @@ def radialSum(data, distance = 140000., pixSize = 88.6, center = CENTER):
         where theta is in degrees
     """
     if type(data) == str:
-        #data = np.array(Image.open(data))
-        #data = TIFF.open(mccd, 'r').read_image()
         data = open_mccd(mccd)
     if center is None:
         l, h = np.shape(data)
@@ -446,7 +403,7 @@ def dark_subtraction(npulses, nframes = 1):
     Otherwise an interpolation between existing exposures is performed and
     returned.
     """
-    # TODO: refactor this; specify dark frames in a global variable at the
+    # TODO: refactor this; specify dark frames in a variable at the
     # module scope. 
     lookup_dict =\
         {1: radial_mean("dark_runs/1p_dark*"),
@@ -511,16 +468,18 @@ def air_scatter2(npulses, attenuation, nframes = 1, filtersize = 10):
         #raw =  np.genfromtxt(path)[1]
         #return raw - dark_subtraction(npulses_ref)
         return gaussian_filter(unsubtracted - dark_subtraction(npulses), filtersize)
+    # TODO: find air scatter dataset with same attenuation level (instead of
+    # defaulting to 10x)
     def interpolated():
         npulses_intepolation = 10
         attenuation_interpolation = 10
+        #attenuation_interpolation = attenuation
         return nframes * (npulses/npulses_intepolation) *\
             extract_intensity(npulses_intepolation, attenuation_interpolation) * actual_attenuations[attenuation_interpolation]/ actual_attenuations[attenuation]
     if (npulses, attenuation) in BACKGROUND_DICT:
         print "found air scatter data: ", (npulses, attenuation)
         return nframes * extract_intensity(npulses, attenuation)
     else:
-        #raise ValueError("air scatter data not found") #debug
         print "interpolating air scatter data"
         return interpolated()
 
@@ -546,7 +505,6 @@ def kapton_only(npulses, attenuation = 1, nframes = 1, subtract_air_scatter = Fa
 def bgsubtract(npulses, attenuation, nframes, kaptonfactor = 1., airfactor = 1.):
     darksub = dark_subtraction(npulses, nframes)
     airsub = airfactor * air_scatter2(npulses, attenuation, nframes)
-    #kaptonsub = kaptonfactor * kapton_background(npulses, attenuation, nframes)
     if kaptonfactor: # kaptonsub != 0
         kaptonsub = kaptonfactor * kapton_only(npulses, attenuation, nframes)
     else:
@@ -561,11 +519,6 @@ def beam_spectrum(attenuator):
     else:
         attenuation = ATTENUATION_FUNCTIONS[attenuator]
         return [beam[0], beam[1] * attenuation(beam[0])]
-#    elif attenuator == 'Ag':
-#        
-#    elif attenuator == 'Ti':
-#        Ti = mu.ElementData(22).sigma
-#        return [beam[0], beam[1] * np.exp(-Ti(beam[0])/30.)]
 
 # A few functions for extracting information about a glob pattern
 def glob_nframes(glob_pattern):
@@ -627,7 +580,6 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
 #    Given a glob pattern, array of peak intervals, and spectrum, return
 #    peak intensity as a function of temperatur 
 
-#def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder = True, plot_integrated_intensities = False, show = True, dtheta = 5e-4, filtsize = 2, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0.0, normalize = '', peak_ranges = None):
 def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder = True, show = True, dtheta = 5e-4, filtsize = 2, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0.0, normalize = '', peak_ranges = None):
     # TODO update docstring
     """
@@ -681,8 +633,11 @@ def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder =
 #        return results
 
 
-    def plot_curves():
-        for pattern, curve in zip(pattern_list, spectra):
+    def plot_curves(cmap_start = 0., cmap_max = 1.0):
+        cmap = plt.get_cmap('coolwarm')
+        ncurves = len(spectra)
+        for i, pattern, curve in zip(range(len(spectra)), pattern_list, spectra):
+            #plt.plot(*curve, label = pattern, color = cmap(cmap_start + i * (cmap_max - cmap_start)/ncurves))
             plt.plot(*curve, label = pattern)
         plt.legend()
 #        ax.set_xlabel('Angle (rad)')
@@ -717,5 +672,3 @@ def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder =
         plt.show()
     return spectra
 
-# get beam spectrum from .txt file in the mda directory
-getprof = lambda name: [np.genfromtxt(name).T[1], np.genfromtxt(name).T[22]]
