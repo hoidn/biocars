@@ -7,7 +7,7 @@ from scipy import interpolate
 import atexit, dill
 import hashlib
 import collections
-import utils
+from utils import utils
 
 np.seterr(invalid='raise')
 

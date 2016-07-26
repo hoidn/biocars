@@ -1,5 +1,4 @@
 import sys
-import ipdb
 import numpy as np
 import numpy.ma as ma
 import scipy
@@ -23,7 +22,7 @@ import re
 import rldeconvolution
 
 import mu
-import utils
+from utils import utils
 
 import pickle
 import atexit, dill
