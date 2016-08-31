@@ -6,14 +6,13 @@ import os
 import pdb
 import glob
 from PIL import Image
-import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from scipy.ndimage.filters import gaussian_filter
 from scipy import arange, array, exp
 from scipy.optimize import minimize_scalar
 import operator
 import fnmatch
-from  libtiff import TIFF
+#from  libtiff import TIFF
 import random
 import string
 import re
@@ -21,41 +20,48 @@ import re
 
 import rldeconvolution
 
-import mu
+from mu import mu
 from utils import utils
+from xrdconfig import actual_attenuations, ATTENUATION_FUNCTIONS, plt
 
 import pickle
 import atexit, dill
 
 # TODO: move these data to a different module
 # TODO: attenuation factors for the Al filters
+# TODO: get rid of explicit caching (using the radial_integrations directories)
 
-# map nominal attenuation values to actual
-actual_attenuations =\
-    {1: 1.,
-    1: 1.,
-    1.5: 1.51,# revise
-    2.5: 2.29,# revise
-    4.5: 4.8,# revise
-    # 6 layers of UHV Al. This value is based on attenuation at 12 
-    #keV (not a proper average over the incident spectrum
-    2: 1.957,
-    300: 563.,# Ag
-    10: 12.,# Ti
-    74: 103.5,
-    32: 42.3,
-    3: 3.2,
-    7: 7.4}
+# From Nov 2015 beam run
+## map nominal attenuation values to actual
+#actual_attenuations =\
+#    {1: 1.,
+#    1: 1.,
+#    1.5: 1.51,# revise
+#    2.5: 2.29,# revise
+#    4.5: 4.8,# revise
+#    # 6 layers of UHV Al. This value is based on attenuation at 12 
+#    #keV (not a proper average over the incident spectrum
+#    2: 1.957,
+#    300: 563.,# Ag
+#    10: 12.,# Ti
+#    74: 103.5,
+#    32: 42.3,
+#    3: 3.2,
+#    7: 7.4}
 
 nominal_attenuations = {v: k for k, v in actual_attenuations.items()}
 
 # combinations of number of pulses and nominal attenuation for which we've
 # measured air scatter
-measured_background_params = [(100, 300), (250, 300), (400, 300), (500, 300),
-    (100, 74), (50, 74), (50, 32), (10, 10), (1, 3), (3, 3), (2, 3), (4, 3),
-    (8, 3), (16, 3), (32, 3), (64, 3), (128, 3), (1, 1), (5, 1), (10, 1),
-    (2, 1), (4, 1), (8, 1), (1, 1.5), (1, 4.5), (1, 7), (1, 2.5), (2, 2.5), (4, 2.5), (8, 2.5),
-    (2, 4.5), (4, 4.5), (8, 4.5)]
+#measured_background_params = [(100, 300), (250, 300), (400, 300), (500, 300),
+#    (100, 74), (50, 74), (50, 32), (10, 10), (1, 3), (3, 3), (2, 3), (4, 3),
+#    (8, 3), (16, 3), (32, 3), (64, 3), (128, 3), (1, 1), (5, 1), (10, 1),
+#    (2, 1), (4, 1), (8, 1), (1, 1.5), (1, 4.5), (1, 7), (1, 2.5), (2, 2.5), (4, 2.5), (8, 2.5),
+#    (2, 4.5), (4, 4.5), (8, 4.5)]
+measured_background_params = [
+     (10, 10), (1, 3), 
+     (1, 1),  (10, 1),
+     (1, 7)]
 AIR_SCATTERN_PATTERN = 'air_scatter_copied/%dp_%sx_as*' 
 
 def open_mccd(filepath):
@@ -63,7 +69,8 @@ def open_mccd(filepath):
     Open an mccd file, perform basic conditioning, and return it as a numpy
     array.
     """
-    img = TIFF.open(filepath, 'r').read_image()
+    #img = TIFF.open(filepath, 'r').read_image()
+    img = np.array(Image.open(filepath))
     # get rid of outying pixel values
     # TODO: make the threshold paramater adjustable?
     threshold = 20. * np.std(img)
@@ -105,29 +112,6 @@ def pinkbeam_spectrum():
     beam[0] = 1000 * beam[0]
     return beam
 
-def make_attenuation_function(element, scale):
-    """
-    element: an element identifier (either atomic number or 1 or 2 letter abbreviation)
-    scale: a fit parameter that corresponds (but is not equal) to the thickness
-    """
-    return lambda energies: np.exp(-(mu.ElementData(element).sigma)(energies)/scale)
-
-@utils.persist_to_file("cache/make_attenuation_function_from_transmission.p")
-def make_attenuation_function_from_transmission(element, transmission):
-    energies, intensities = pinkbeam_spectrum() # unattenuated beam profile
-    myfunc = lambda scale: np.exp(-(mu.ElementData(element).sigma)(energies)/scale) 
-    deviation = lambda scale: abs(transmission - np.sum(myfunc(scale) * intensities)/np.sum(intensities))
-    res = minimize_scalar(deviation)
-    scale = res.x
-    print 'scale factor for ', element, ':', scale
-    return make_attenuation_function(element, scale)
-
-def make_attenuation_function_from_thickness(element, thickness):
-    """
-    Return an attenuation function given an element and a thickness (in cm).
-    """
-    eltdat = mu.ElementData(element)
-    return lambda energies: np.exp(-(eltdat.sigma)(energies) * eltdat.density * thickness)
 
 #center coords of the beam on the ccd
 CENTER = [1984, 1967]
@@ -135,22 +119,23 @@ CENTER = [1984, 1967]
 PHOTON_ENERGY = 12000. # NOMINAL incident photon energy
 HBARC = 1973. #eV * Angstrom
 
-# Define filter transmission functions
-Alfoil_thickness = 17e-4 # speculative
-ATTENUATION_FUNCTIONS = {}
-ATTENUATION_FUNCTIONS[2] = make_attenuation_function_from_thickness('Al', 6 * Alfoil_thickness)
-ATTENUATION_FUNCTIONS[1.5] = make_attenuation_function_from_thickness('Al', 4 * Alfoil_thickness)
-ATTENUATION_FUNCTIONS[2.5] = make_attenuation_function_from_thickness('Al', 8 * Alfoil_thickness)
-ATTENUATION_FUNCTIONS[300] = make_attenuation_function_from_thickness('Ag', 75e-4)
-ATTENUATION_FUNCTIONS[10] = make_attenuation_function_from_thickness('Ti', 75e-4)
-ATTENUATION_FUNCTIONS[7] = lambda energies: make_attenuation_function_from_thickness('Al', 25e-4)(energies) *\
-    make_attenuation_function_from_thickness('Ag', 25e-4)(energies)
-ATTENUATION_FUNCTIONS[3] = lambda energies: make_attenuation_function_from_thickness('Al', 100e-4)(energies) *\
-    make_attenuation_function_from_thickness('Ti', 25e-4)(energies)
-ATTENUATION_FUNCTIONS[4.5] = lambda energies: make_attenuation_function_from_thickness('Al', 4 * Alfoil_thickness)(energies) *\
-    ATTENUATION_FUNCTIONS[3](energies)
-ATTENUATION_FUNCTIONS[32] = lambda energies: ATTENUATION_FUNCTIONS[3](energies) * ATTENUATION_FUNCTIONS[10](energies)
-ATTENUATION_FUNCTIONS[74] = lambda energies: ATTENUATION_FUNCTIONS[7](energies) * ATTENUATION_FUNCTIONS[10](energies)
+# From Nov 2015 run. Filters were changed thereafter
+## Define filter transmission functions
+#Alfoil_thickness = 17e-4 # speculative
+#ATTENUATION_FUNCTIONS = {}
+#ATTENUATION_FUNCTIONS[2] = make_attenuation_function_from_thickness('Al', 6 * Alfoil_thickness)
+#ATTENUATION_FUNCTIONS[1.5] = make_attenuation_function_from_thickness('Al', 4 * Alfoil_thickness)
+#ATTENUATION_FUNCTIONS[2.5] = make_attenuation_function_from_thickness('Al', 8 * Alfoil_thickness)
+#ATTENUATION_FUNCTIONS[300] = make_attenuation_function_from_thickness('Ag', 75e-4)
+#ATTENUATION_FUNCTIONS[10] = make_attenuation_function_from_thickness('Ti', 75e-4)
+#ATTENUATION_FUNCTIONS[7] = lambda energies: make_attenuation_function_from_thickness('Al', 25e-4)(energies) *\
+#    make_attenuation_function_from_thickness('Ag', 25e-4)(energies)
+#ATTENUATION_FUNCTIONS[3] = lambda energies: make_attenuation_function_from_thickness('Al', 100e-4)(energies) *\
+#    make_attenuation_function_from_thickness('Ti', 25e-4)(energies)
+#ATTENUATION_FUNCTIONS[4.5] = lambda energies: make_attenuation_function_from_thickness('Al', 4 * Alfoil_thickness)(energies) *\
+#    ATTENUATION_FUNCTIONS[3](energies)
+#ATTENUATION_FUNCTIONS[32] = lambda energies: ATTENUATION_FUNCTIONS[3](energies) * ATTENUATION_FUNCTIONS[10](energies)
+#ATTENUATION_FUNCTIONS[74] = lambda energies: ATTENUATION_FUNCTIONS[7](energies) * ATTENUATION_FUNCTIONS[10](energies)
 
 
 def mask_peaks_and_iterpolate(x, y, peak_ranges):
@@ -193,14 +178,20 @@ def peak_sizes(x, y, peak_ranges, bg_subtract = True):
 
 
 
+# TODO: write test case for sample_Au10x*
 def deep_glob(pattern):
     """
     TODO: this will break if there's a glob outside of the 
     filename part of the pattern
+
+    Pattern may be either a glob pattern or a list of file paths.
     """
-    return [os.path.join(dirpath, f) \
-        for dirpath, dirnames, files in os.walk(os.path.dirname(pattern)) \
-            for f in fnmatch.filter(files, os.path.basename(pattern))]
+    if type(pattern) == str:
+        return [os.path.join(dirpath, f) \
+            for dirpath, dirnames, files in os.walk(os.path.dirname(pattern)) \
+                for f in fnmatch.filter(files, os.path.basename(pattern))]
+    else: # Assume a list of paths
+        return pattern
 
 def radial_density_paths(directory_glob_pattern):
     """
@@ -213,13 +204,14 @@ def radial_density_paths(directory_glob_pattern):
         radial_file_path = dirname + "/radial_integrations/" + basename + "processed.dat"
         return radial_file_path
 
-    if directory_glob_pattern[-5:] != ".mccd":
+    if type(directory_glob_pattern) == str and directory_glob_pattern[-5:] != ".mccd":
         directory_glob_pattern = directory_glob_pattern + "*mccd"
     all_mccds = deep_glob(directory_glob_pattern)
     radial_paths = map(radial_name, all_mccds)
     return radial_paths
 
-@utils.persist_to_file("cache/sum_radial_densities.p")
+#@utils.eager_persist_to_file("cache/sum_radial_densities.p")
+@utils.memoize(timeout = None)
 def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = False, ncores = None):
     """
     Sum or average radial density profiles
@@ -235,13 +227,13 @@ def sum_radial_densities(directory_glob_pattern, average = False, give_tuple = F
     generate_radial_all(directory_glob_pattern, ncores = ncores)
     extractIntensity = lambda name: np.genfromtxt(name)
     if not average:
-        r, intensity = sum_many(utils.parallelmap(extractIntensity, paths))
+        r, intensity = sum_many(map(extractIntensity, paths))
         if give_tuple:
             return r/len(paths), intensity
         else:
             return intensity
     else:
-        return sum_many(utils.parallelmap(extractIntensity, paths))[1]/len(paths)
+        return sum_many(map(extractIntensity, paths))[1]/len(paths)
 
 
 
@@ -259,10 +251,12 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
         radial_file_path = dirname + "/radial_integrations/" + basename + "processed.dat"
         return radial_file_path
 
-    if directory_glob_pattern[-5:] != ".mccd":
+    if type(directory_glob_pattern) == str and directory_glob_pattern[-5:] != ".mccd":
         directory_glob_pattern = directory_glob_pattern + "*mccd"
     all_mccds = deep_glob(directory_glob_pattern)
     
+    @utils.eager_persist_to_file("cache/process_one_frame/")
+    # TODO: why does caching fail here?
     def process_one_frame(mccd):
         """
         Radially integrate a frame and save the result to file
@@ -276,7 +270,7 @@ def generate_radial_all(directory_glob_pattern, recompute = False, center = CENT
             img =  open_mccd(mccd)
             radial = radialSum(img,  center = center)
             np.savetxt(radial_path, radial)
-    utils.parallelmap(process_one_frame, all_mccds, nodes = ncores)
+    map(process_one_frame, all_mccds)
 
 
 #normalization modes: peak, if a numerical value is provided it is assumed to be the angle at which
@@ -347,7 +341,7 @@ def radialSum(data, distance = 140000., pixSize = 88.6, center = CENTER):
         where theta is in degrees
     """
     if type(data) == str:
-        data = open_mccd(mccd)
+        data = open_mccd(data)
     if center is None:
         l, h = np.shape(data)
         center = [l/2, h/2]
@@ -393,7 +387,7 @@ normalization, bgsub = bgsub, label = glob, scale = scale, plot = show)
 def radial_mean(filenames, sigma = 1, ncores = None):
     return gaussian_filter(sum_radial_densities(filenames, average = True), sigma = sigma)
 
-@utils.persist_to_file("cache/dark_subtraction.p")
+@utils.eager_persist_to_file("cache/dark_subtraction/")
 def dark_subtraction(npulses, nframes = 1):
     """
     Return the dark frame for an exposure of duration npulses.
@@ -402,24 +396,42 @@ def dark_subtraction(npulses, nframes = 1):
     Otherwise an interpolation between existing exposures is performed and
     returned.
     """
+    #pdb.set_trace()
     # TODO: refactor this; specify dark frames in a variable at the
-    # module scope. 
+    # module scope. Add interpolation. (vs number of pulses)
+#    lookup_dict =\
+#        {1: radial_mean("dark_runs/1p_dark*"),
+#        2: radial_mean("dark_runs/2p_dark*"),
+#        3: radial_mean("dark_runs/3p_dark*"),
+#        4: radial_mean("dark_runs/4p_dark*"),
+#        5: radial_mean("dark_runs/5p_dark*"),
+#        8: radial_mean("dark_runs/8p_dark*"),
+#        10: radial_mean("dark_runs/10p_dark*"),
+#        16: radial_mean("dark_runs/16p_dark*"),
+#        50: radial_mean("dark_runs/50p_dark*"),
+#        64: radial_mean("dark_runs/64p_dark*"),
+#        100: radial_mean("dark_runs/100p_dark*"),
+#        128: radial_mean("dark_runs/128p_dark*"),
+#        250: radial_mean("dark_runs/250p_dark*"),
+#        400: radial_mean("dark_runs/400p_dark*"),
+#        500: radial_mean("dark_runs/500p_dark*"),
+#        1000: radial_mean("background_exposures/dark_frames/dark_1000p*")}
     lookup_dict =\
-        {1: radial_mean("dark_runs/1p_dark*"),
-        2: radial_mean("dark_runs/2p_dark*"),
-        3: radial_mean("dark_runs/3p_dark*"),
-        4: radial_mean("dark_runs/4p_dark*"),
-        5: radial_mean("dark_runs/5p_dark*"),
-        8: radial_mean("dark_runs/8p_dark*"),
-        10: radial_mean("dark_runs/10p_dark*"),
-        16: radial_mean("dark_runs/16p_dark*"),
-        50: radial_mean("dark_runs/50p_dark*"),
-        64: radial_mean("dark_runs/64p_dark*"),
+        {1: radial_mean("../xrd/dark/dark_1p*"),
+        #2: radial_mean("dark_runs/2p_dark*"),
+        #3: radial_mean("dark_runs/3p_dark*"),
+        #4: radial_mean("dark_runs/4p_dark*"),
+        #5: radial_mean("dark_runs/5p_dark*"),
+        #8: radial_mean("dark_runs/8p_dark*"),
+        10: radial_mean("../xrd/dark/dark_10p*"),
+        #16: radial_mean("dark_runs/16p_dark*"),
+        #50: radial_mean("dark_runs/50p_dark*"),
+        #64: radial_mean("dark_runs/64p_dark*"),
         100: radial_mean("dark_runs/100p_dark*"),
-        128: radial_mean("dark_runs/128p_dark*"),
-        250: radial_mean("dark_runs/250p_dark*"),
-        400: radial_mean("dark_runs/400p_dark*"),
-        500: radial_mean("dark_runs/500p_dark*"),
+        #128: radial_mean("dark_runs/128p_dark*"),
+        #250: radial_mean("dark_runs/250p_dark*"),
+        #400: radial_mean("dark_runs/400p_dark*"),
+        #500: radial_mean("dark_runs/500p_dark*"),
         1000: radial_mean("background_exposures/dark_frames/dark_1000p*")}
     def dark_frame(npulses):
         if npulses in lookup_dict:
@@ -428,7 +440,7 @@ def dark_subtraction(npulses, nframes = 1):
             return (lookup_dict[1000] - lookup_dict[1]) * ((npulses - 1)/999.) + lookup_dict[1]
     return dark_frame(npulses) * nframes
 
-@utils.persist_to_file("cache/air_scatter.p")
+@utils.eager_persist_to_file("cache/air_scatter/")
 def air_scatter(npulses, attenuation, nframes = 1):
     """
     Return estimated air scatter contribution to the radial profile for a given
@@ -440,12 +452,11 @@ def air_scatter(npulses, attenuation, nframes = 1):
         return raw - dark_subtraction(npulses_ref)
     def interpolated(attenuation):
         return attenuation_1x_1000p / attenuation
-    #lookup_dict = {1:extract_intensity( "background_exposures/beam_on_no_sample_2/radial_integrations/1x_1000p_001.mccdprocessed.dat"), 10: extract_intensity("background_exposures/beam_on_no_sample_2/radial_integrations/10x_1000p.mccdprocessed.dat"), 300: extract_intensity("background_exposures/beam_on_no_sample_2/radial_integrations/300x_1000p.mccdprocessed.dat")}
     npulses_ref = 1000. #number of pulses in the air scatter refernce images
     attenuation_1x_1000p = extract_intensity("background_exposures/beam_on_no_sample_2/radial_integrations/1x_1000p_001.mccdprocessed.dat")
     return nframes * (npulses/npulses_ref) * interpolated(attenuation)
 
-@utils.persist_to_file("cache/air_scatter2.p")
+@utils.eager_persist_to_file("cache/air_scatter2/")
 def air_scatter2(npulses, attenuation, nframes = 1, filtersize = 10):
     """
     Return estimated air scatter contribution to the radial profile for a given
@@ -464,8 +475,6 @@ def air_scatter2(npulses, attenuation, nframes = 1, filtersize = 10):
         add_background_dict_entry(pair[0], pair[1], radial_mean)
     def extract_intensity(npulses, attenuation):
         unsubtracted = BACKGROUND_DICT[(npulses, attenuation)]
-        #raw =  np.genfromtxt(path)[1]
-        #return raw - dark_subtraction(npulses_ref)
         return gaussian_filter(unsubtracted - dark_subtraction(npulses), filtersize)
     # TODO: find air scatter dataset with same attenuation level (instead of
     # defaulting to 10x)
@@ -551,13 +560,14 @@ def glob_attenuator(glob_pattern):
         print 'attenuation ', attenuation
         return attenuation
 
-@utils.eager_persist_to_file("cache/full_process/")
+#@utils.eager_persist_to_file("cache/full_process/")
+@utils.memoize(timeout = None)
 def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 2, npulses = 1, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0.3, deconvolution_iterations = 100, ncores = None, **kwargs):
     """
     process image files into radial distributions if necessary, then 
     sum the distributions and deconvolve
 
-    attenuator: == 'None' or 'Ag'
+    attenuator: numeric value
     """
     beam = beam_spectrum(attenuator)
     generate_radial_all(glob_pattern, center = center, ncores = ncores)
@@ -567,17 +577,15 @@ def full_process(glob_pattern, attenuator, norm = 1., dtheta = 1e-3, filtsize = 
     print "nframes: " + str(nframes)
     angles, intensities = process_all_globs([glob_pattern], subArray=[bgsubtract(npulses, actual_attenuations[attenuator], nframes, kaptonfactor =  kaptonfactor, airfactor = airfactor)], normalizationArray=[actual_attenuations[attenuator]/(npulses * nframes)], show = False, ncores = ncores)
     angles = np.deg2rad(angles)
-    # zero negative values
+    # zero negative values TODO: find cause for negative values here. 
     intensities[intensities < 0] = 0.
-    est = rldeconvolution.deconvolve(angles, gaussian_filter(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix', smooth_size = smooth_size, deconvolution_iterations = deconvolution_iterations)
-    return est
+    if deconvolution_iterations == 0:
+        return angles, gaussian_filter(intensities, filtsize)
+    else:
+        return rldeconvolution.deconvolve(angles, gaussian_filter(intensities, filtsize), beam[0], beam[1], dtheta, 'matrix', smooth_size = smooth_size, deconvolution_iterations = deconvolution_iterations)
 
 
 
-#def temperature_profile(pattern, x, y):
-#    """
-#    Given a glob pattern, array of peak intervals, and spectrum, return
-#    peak intensity as a function of temperatur 
 
 def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder = True, show = True, dtheta = 5e-4, filtsize = 2, center = CENTER, airfactor = 1.0, kaptonfactor = 0.0, smooth_size = 0.0, normalize = '', peak_ranges = None):
     # TODO update docstring
@@ -593,10 +601,6 @@ def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder =
             (necessary for generating a plot of integrated Bragg peak intensities)
     """
     def one_spectrum(pattern):
-#        if isinstance(element, tuple):
-#            pattern, normalization = element
-#        else: # element is a string
-#            pattern = element 
         npulses = glob_npulses(pattern)
         x, y = full_process(pattern, glob_attenuator(pattern), dtheta = dtheta,
             filtsize = filtsize, npulses = npulses, center = center, airfactor = airfactor,
@@ -614,26 +618,11 @@ def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder =
         else:
             return x, y
     spectra = [one_spectrum(pattern) for pattern in pattern_list]
-    #spectra = utils.parallelmap(one_spectrum, pattern_list)
-
-#    def relative_peak_integrals():
-#        """
-#        Returns an array of peak integrated intensities, normalized to the
-#        values in the first element of spectra
-#        """
-#        if peak_ranges is None:
-#            raise ValueError("peak_ranges argument must be given to evaluate peak integrated intensities")
-#        xref, yref = spectra[0]
-#        ref_size = np.array(peak_sizes(xref, yref, peak_ranges))
-#        results = []
-#        for x, y in spectra:
-#            results.append(np.array(peak_sizes(x, y, peak_ranges)) / ref_size)
-#            print results
-#        return results
 
 
     def plot_curves(cmap_start = 0., cmap_max = 1.0):
-        cmap = plt.get_cmap('coolwarm')
+        # TODO: implement this
+        #cmap = plt.get_cmap('coolwarm')
         ncurves = len(spectra)
         for i, pattern, curve in zip(range(len(spectra)), pattern_list, spectra):
             #plt.plot(*curve, label = pattern, color = cmap(cmap_start + i * (cmap_max - cmap_start)/ncurves))
@@ -644,27 +633,6 @@ def process_and_plot(pattern_list, deconvolution_iterations = 100, plot_powder =
         plt.xlabel('Angle (rad)')
         plt.ylabel('Intensity (arb)')
 
-#    def plot_intensities():
-#        plt.xlabel('Angle (rad)')
-#        plt.ylabel('Relative integrated peak intensity')
-#        profiles = relative_peak_integrals()
-#        x = map(np.mean, peak_ranges)
-#        #ax.set_ylim((0, np.max(profiles)))
-#        for p in profiles:
-#            plt.plot(x, p, 'o-')
-
-#    if plot_powder and plot_integrated_intensities:
-#        if not f:
-#            f, axes = plt.subplots(2, sharex = True)
-#        plot_intensities(axes[1])
-#        plot_curves(axes[0])
-#    else:
-#        if not f:
-#            f, ax = plt.subplots(1)
-#        if plot_integrated_intensities:
-#            plot_curves(ax)
-#        if plot_powder:
-#            plot_intensities(ax)
     if plot_powder:
         plot_curves()
     if show:

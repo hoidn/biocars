@@ -1,6 +1,5 @@
 import numpy as np
 #TODO: these two files are good candidates for a utilities package
-import ipdb
 import scipy.ndimage.filters as filt
 import matplotlib.pyplot as plt
 from scipy import interpolate
@@ -105,7 +104,6 @@ def pre_convolution_mask_matrices(mat1, mat2):
     return mat1, mat2
 
 def pre_convolution_pad_matrices(mat1, mat2):
-#    ipdb.set_trace()
     width = len(mat2) + np.shape(mat1)[1] - 1
     if np.shape(mat1)[0] != width:
         raise ValueError("wrong number of rows in convolution matrix")
@@ -198,7 +196,6 @@ def make_estimator(measuredx, measuredy, kernelx, kernely, grid_spacing, convolu
         kernel_mat_expanded, newy_expanded = pre_convolution_pad_matrices(kernel_mat, newy)
         #TODO: ascontiguousarray: necessary?
         kernel_mat_expanded_reversed = pre_convolution_pad_matrices(np.ascontiguousarray(np.fliplr(kernel_mat)), newy)[0]
-        #ipdb.set_trace()
         @utils.eager_persist_to_file("cache/estimator_matrix/prefix")
         def estimator(num_iterations, current_estimate = newy_expanded):
             for i in range(num_iterations):
